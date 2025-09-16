@@ -192,6 +192,7 @@ def predict_from_metadata(
         scores_df = scores_df.merge(cluster_summary_df[['cluster_id', 'users', 'cluster_name']], on='cluster_id', how='left')
         if 'users' in scores_df.columns:
             scores_df['expected_adopters'] = scores_df['p_adopt'] * scores_df['users']
+            scores_df = scores_df.drop(columns=['users'])
 
     return scores_df.sort_values('p_adopt', ascending=False)
 
