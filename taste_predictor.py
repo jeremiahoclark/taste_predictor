@@ -6,8 +6,16 @@ from textwrap import dedent
 import os
 from groq import Groq
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
 import joblib
+
+# Handle optional ML dependencies gracefully
+try:
+    from sentence_transformers import SentenceTransformer
+    HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    st.warning("⚠️ sentence-transformers not available. Some features may be limited.")
+    HAS_SENTENCE_TRANSFORMERS = False
+    SentenceTransformer = None
 
 # --- Hardcoded Cluster Labels ---
 CLUSTER_LABELS = {
@@ -29,8 +37,17 @@ CLUSTER_LABELS = {
 @st.cache_resource
 def load_models():
     load_dotenv()
-    embedder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-    # Replace with actual paths to your trained models and data
+    
+    # Load SentenceTransformer if available
+    embedder = None
+    if HAS_SENTENCE_TRANSFORMERS:
+        try:
+            embedder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        except Exception as e:
+            st.warning(f"Could not load SentenceTransformer: {e}")
+            embedder = None
+    
+    # Load the ML models and data
     try:
         trained_models = joblib.load('trained_models.pkl')
         centroids = joblib.load('centroids.pkl')
@@ -149,6 +166,10 @@ def predict_from_metadata(
     embedder_model: object,
     cluster_summary_df: pd.DataFrame
 ):
+    if embedder_model is None:
+        st.error("Cannot make predictions without embedder model. Please install sentence-transformers and restart the app.")
+        return pd.DataFrame()
+    
     content_embedding = embedder_model.encode([approved_metadata['embedding_text']])[0]
     content_embedding = content_embedding / (np.linalg.norm(content_embedding) + 1e-12)
 
