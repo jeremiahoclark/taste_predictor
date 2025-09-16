@@ -4,14 +4,13 @@ numpy>=1.21.0
 streamlit>=1.28.0
 plotly>=5.0.0
 
-# Machine learning (optional - for advanced features)
-scikit-learn>=1.0.0
-tensorflow>=2.10.0
+# Machine learning dependencies
+scikit-learn==1.7.1
+joblib>=1.2.0
 
-# LLM integration (optional)
+# LLM integration
 groq>=0.4.0
+python-dotenv>=1.0.0
 
-# Local modules (these should be in the same directory)
-# script_to_metadata.py
-# enhanced_prediction_dashboard.py (optional)
-# roi_optimizer.py (optional)
+# Embeddings (optional - for prediction features)
+sentence-transformers>=2.0.0

@@ -203,7 +203,7 @@ st.title("Taste Predictor")
 # --- 1. Upload Script ---
 uploaded_file = st.file_uploader("Upload a script file (.txt)", type="txt")
 content_type = st.selectbox("Select Content Type", ["TV Show", "Feature Film"])
-groq_model = st.text_input("Groq Model", "moonshotai/kimi-k2-instruct")
+groq_model = st.text_input("Groq Model", "llama3-70b-8192")
 
 
 if 'metadata' not in st.session_state:
