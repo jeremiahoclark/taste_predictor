@@ -1,16 +1,15 @@
-# Core dependencies
+# ── core ─────────────────────────────
+streamlit>=1.28.0
 pandas>=1.5.0
 numpy>=1.21.0
-streamlit>=1.28.0
 plotly>=5.0.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
 
-# Machine learning dependencies
-scikit-learn==1.7.1
-joblib>=1.2.0
-
-# LLM integration
+# ── LLM client ───────────────────────
 groq>=0.4.0
-python-dotenv>=1.0.0
 
-# Embeddings (optional - for prediction features)
-sentence-transformers>=2.0.0
+# ── embeddings  (CPU-only!) ──────────
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+sentence-transformers==0.7.2
