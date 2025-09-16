@@ -12,4 +12,4 @@ groq>=0.4.0
 # ── embeddings  (CPU-only!) ──────────
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2+cpu
-sentence-transformers==0.7.2
+sentence-transformers>=2.0.0
