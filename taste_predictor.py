@@ -198,12 +198,16 @@ def predict_from_metadata(
 
 # --- Streamlit App ---
 
-st.title("Taste Predictor")
+st.title("Content Engagement Predictor")
+
+# Instructions
+st.markdown("**1.** Upload script or pitch (document) **|** **2.** Modify descriptions if needed **|** **3.** View engagement")
+st.markdown("---")
 
 # --- 1. Upload Script ---
 uploaded_file = st.file_uploader("Upload a script file (.txt)", type="txt")
-content_type = st.selectbox("Select Content Type", ["TV Show", "Feature Film"])
-groq_model = st.text_input("Groq Model", "openai/gpt-oss-120b")
+content_type = st.radio("Select Content Type", ["TV Show", "Feature Film"], horizontal=True)
+groq_model = "openai/gpt-oss-120b"  # Hidden from UI
 
 
 if 'metadata' not in st.session_state:
@@ -244,20 +248,76 @@ if st.session_state.metadata:
 
 # --- 3. Visualize Output ---
 if st.session_state.predictions is not None:
-    st.subheader("Prediction Results")
-
-    # Create a 3x4 grid
-    cols = st.columns(4)
-    
     # Sort predictions by p_adopt
     sorted_predictions = st.session_state.predictions.sort_values('p_adopt', ascending=False)
+
+    # Calculate engagement index (average of top 3 clusters)
+    top_3_scores = sorted_predictions.head(3)['p_adopt'].values
+    engagement_index = top_3_scores.mean()
+
+    # Determine recommendation level
+    if engagement_index > 0.65:
+        recommendation = "Strong Opportunity"
+        color = "green"
+    elif engagement_index >= 0.45:
+        recommendation = "Moderate Opportunity"
+        color = "orange"
+    else:
+        recommendation = "Weak Opportunity"
+        color = "red"
+
+    # Generate qualitative insight
+    top_cluster_name = CLUSTER_LABELS.get(str(sorted_predictions.iloc[0]['cluster_id']), "Unknown")
+    top_score = sorted_predictions.iloc[0]['p_adopt']
+    second_score = sorted_predictions.iloc[1]['p_adopt'] if len(sorted_predictions) > 1 else 0
+    third_score = sorted_predictions.iloc[2]['p_adopt'] if len(sorted_predictions) > 2 else 0
+
+    top_3_names = [CLUSTER_LABELS.get(str(sorted_predictions.iloc[i]['cluster_id']), "Unknown") for i in range(min(3, len(sorted_predictions)))]
+
+    if top_score - second_score > 0.15:
+        insight = f"Strong appeal to **{top_cluster_name}** audience"
+    elif top_score < 0.60:
+        insight = f"Niche content with focused appeal to **{top_cluster_name}** viewers"
+    else:
+        insight = f"Broad engagement across **{top_3_names[0]}**, **{top_3_names[1]}**, and **{top_3_names[2]}** audiences"
+
+    # Display Recommendation Section
+    st.markdown("### Recommendation")
+
+    # Overall recommendation banner
+    st.markdown(f"""
+    <div style="background-color: {color}; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
+        <h1 style="color: white; margin: 0;">{recommendation}</h1>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Key insight
+    st.markdown(f"**Key Insight:** {insight}")
+
+    # Engagement score
+    st.metric("Engagement Score", f"{engagement_index:.0%}", help="Average engagement probability of top 3 audience clusters")
+
+    st.markdown("---")
+
+    # Detailed breakdown
+    st.subheader("Audience Engagement Breakdown")
+
+    # Create a 3x4 grid with better visual hierarchy
+    cols = st.columns(4)
 
     for i, row in enumerate(sorted_predictions.itertuples()):
         cluster_id = str(row.cluster_id)
         label = CLUSTER_LABELS.get(cluster_id, f"Cluster {cluster_id}")
         p_adopt = row.p_adopt
-        
-        with cols[i % 4]:
-            st.metric(label=label, value=f"{p_adopt:.2%}")
 
-    st.dataframe(st.session_state.predictions)
+        # Highlight top 3 clusters
+        is_top_3 = i < 3
+
+        with cols[i % 4]:
+            if is_top_3:
+                st.markdown(f"**TOP: {label}**")
+            st.metric(label=label if not is_top_3 else "", value=f"{p_adopt:.0%}")
+
+    # Optional: Show detailed table in expander
+    with st.expander("View Detailed Data"):
+        st.dataframe(st.session_state.predictions, use_container_width=True)
