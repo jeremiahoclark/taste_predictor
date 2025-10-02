@@ -808,13 +808,13 @@ st.markdown("""
 # Modern header
 st.markdown("""
 <div class="main-header">
-    <h1>Content Engagement Predictor</h1>
+    <h1>Signal</h1>
     <p>Audience engagement analysis for scripts and pitches</p>
 </div>
 """, unsafe_allow_html=True)
 
 # Create tabs
-tab1, tab2 = st.tabs(["Engagement Predictor", "ROI Predictor"])
+tab1, tab2, tab3 = st.tabs(["Engagement Predictor", "ROI Predictor", "Cluster Guide"])
 
 # Initialize session state
 if 'metadata' not in st.session_state:
@@ -1169,3 +1169,157 @@ with tab2:
         with st.expander("View Detailed Breakdown"):
             if not user_counts.empty:
                 st.dataframe(pred_with_users[['cluster_name', 'p_adopt', 'users', 'expected_adopters', 'cluster_value']], use_container_width=True)
+
+# ==================== TAB 3: CLUSTER GUIDE ====================
+with tab3:
+    st.markdown("### Understanding Our Audience Clusters")
+    st.markdown("Our audience is organized into 12 distinct taste clusters, each with unique content preferences and viewing patterns.")
+
+    # Cluster data structure
+    CLUSTER_INFO = {
+        0: {
+            "name": "Romance-Infused, Suspense-Driven Stories",
+            "subtitle": "Love, Lies, and Power Plays",
+            "description": "Stories where love and desire intersect with secrets, danger, and high-stakes intrigue. From hidden royalty and obsessive relationships to family betrayals and psychological threats, these narratives blend romance, attraction, and even obsession with suspenseful drama. Viewers drawn here enjoy emotionally charged plots where passion and peril collide.",
+            "genres": ["Thriller", "Romance", "Dark Comedy"],
+            "subgenres": ["Holiday Romance", "Mystery", "Slasher"],
+            "tropes": ["secret royalty", "cultural clash", "obsessive love", "isolation of victim", "technology as weapon"]
+        },
+        1: {
+            "name": "Celebrity- and Culture-Driven Comedy",
+            "subtitle": "Satire, Fame, and Hustle",
+            "description": "Comedies, satires, and biographical dramas that explore celebrity life, music history, and urban culture. From animated coming-of-age stories and stand-up showcases to music biopics and satirical Hollywood send-ups, these narratives mix humor with cultural commentary. Viewers drawn here enjoy both the laughs and the behind-the-scenes look at fame, fortune, and the struggles that come with them. Audiences are drawn to the way these series lets them get an inside look at a life of luxury while showing the drawbacks that come with it. A critique and celebration at the same time.",
+            "genres": ["Comedy", "Adult Animation", "Biographical Drama"],
+            "subgenres": ["Comedy", "Satire", "Music Biography"],
+            "tropes": ["coming of age", "betrayal", "riches-to-rags/rags-to-riches", "rise to fame", "downfall"]
+        },
+        2: {
+            "name": "Reality-Driven, Socially Chaotic Comedy",
+            "subtitle": "Everyday Life and Misadventures",
+            "description": "Reality shows, docuseries, and comedic urban stories where family, friends, and social dynamics collide. From prank dating shows and hidden-camera reveals to influencer feuds and dysfunctional gatherings, these narratives mix humor with relatable chaos and unexpected misadventures. Viewers enjoy laugh-out-loud moments rooted in real-life awkwardness, social drama, everyday mishaps, and resilient characters navigating life's ups and downs.",
+            "genres": ["Reality-TV", "Reality", "Comedy"],
+            "subgenres": ["Prank Dating Show", "Docuseries", "Family Sitcom"],
+            "tropes": ["hidden camera reveals", "overcoming adversity", "culture clash", "cringe comedy", "hijinks and antics"]
+        },
+        3: {
+            "name": "Hidden Identity, Crime, and Supernatural Thrills",
+            "subtitle": "Secrets, Power, and Betrayal",
+            "description": "A mix of animated odd-couple comedies, teen superhero adventures, and crime-driven sagas that explore hidden identities and high-stakes deception. Stories range from lighthearted animation with quirky dynamics to dark dramas about family empires, infidelity, and betrayal. They often employ melodrama with a genre-edge that helps elevate the experience for more niche audiences. Viewers here gravitate toward narratives where living a double life—whether as a ghost-powered teen or a crime boss—creates both comedy and danger.",
+            "genres": ["Animation", "Superhero", "Crime Drama"],
+            "subgenres": ["Comedy", "Teen Superhero", "Family Saga"],
+            "tropes": ["odd couple dynamic", "double life", "interracial affairs", "couples therapy gone wrong", "infidelity revenge"]
+        },
+        4: {
+            "name": "Adult Relationship and Life-Stage Stories",
+            "subtitle": "Love, Friendship, and Second Chances",
+            "description": "Comedies, dramas, and docuseries exploring love, relationships, and personal growth in adulthood. From divorce recovery and midlife crises to dating disasters and redemption arcs, these stories balance humor with heartfelt lessons. Viewers drawn here enjoy character-driven narratives about love, friendship, and second chances. They focus either on the lives of the wealthy or trendy (for audiences to live vicariously) or on more grounded life events like financial or marital issues (to give audiences a sense of relatability or kinship).",
+            "genres": ["Comedy", "Comedy Drama", "Reality"],
+            "subgenres": ["Drama", "Romantic Drama", "Docuseries"],
+            "tropes": ["redemption arc", "divorce recovery", "relationship drama", "dating app gone wrong", "midlife crisis"]
+        },
+        5: {
+            "name": "Community, Music, and Relationship Stories",
+            "subtitle": "Love, Celebration, and Homecoming",
+            "description": "Dramas, comedies, and biographical stories that explore love, music, and the pull of community. These narratives often center on characters navigating romance, personal hardship, or artistic ambition, while finding strength in family bonds or cultural celebration. Whether through sugar relationships, hometown reunions, or rise-to-fame music stories, this cluster appeals to those drawn to heartfelt journeys with both joy and struggle. Cultural traditions (community, music, gatherings, etc) often serve as a reflection of the drama/themes at play in the material, giving a stronger catharsis than narrative alone can achieve.",
+            "genres": ["Drama", "Biographical Drama"],
+            "subgenres": ["Romance", "Comedy", "Music Biography"],
+            "tropes": ["sugar daddy relationships", "solo careers vs. group success", "community celebration", "family bonds", "returning home"]
+        },
+        6: {
+            "name": "Ambition, Fame, and Erotic Thrillers",
+            "subtitle": "Power, Desire, and Betrayal",
+            "description": "Crime dramas, biographical stories, and relationship-centered sitcoms where ambition and desire drive the action. From maintaining criminal empires to chasing stardom in music or navigating messy romances at work, these narratives mix glitz, drama, and interpersonal conflict. Viewers here enjoy tales of striving for power, fame, and love—often at the cost of loyalty and stability. Protagonists often lose sympathy and either regain it or dive deeper into their moral failings.",
+            "genres": ["Biographical Drama", "Crime Drama", "Sitcom"],
+            "subgenres": ["Music Biography", "Erotic Thriller", "Personality/Celeb Sitcom"],
+            "tropes": ["rise to fame", "workplace antics", "romantic entanglements", "family dynamics", "workplace drama"]
+        },
+        7: {
+            "name": "Faith-Tinged, Family-Focused Comedy",
+            "subtitle": "Faith, Family, and Festive Fiascos",
+            "description": "Where faith meets family dysfunction and holiday hijinks. These stories balance laugh-out-loud slapstick comedy with heartfelt lessons, often set against church pews, Christmas trees, or family gatherings that go off the rails. Humor often comes from the clash between lionized/solemn traditions and dysfunctional human nature. They often play off of generational differences and community tropes. They usually have a distinctive, comic (and at times, antagonistic) figure to represent the older generation to clash with the younger generation (audience insert characters). There are elements of melodrama with an overall sense that family bonds rise above all adversity/conflict.",
+            "genres": ["Comedy", "Reality", "Holiday"],
+            "subgenres": ["Crime Comedy", "Docu-drama", "Holiday Comedy"],
+            "tropes": ["cross", "pastor's kids rebelling", "dressing protagonist", "dance sequence", "girlfriend as antagonist"]
+        },
+        8: {
+            "name": "Star- and Legacy-Centered Documentary",
+            "subtitle": "Behind the Music and the Moments",
+            "description": "Documentaries, reality shows, and biopics offering an intimate look at celebrities, musicians, and cultural figures. These stories reveal the triumphs, struggles, and secrets behind public personas—whether through milestone celebrations, behind-the-scenes concert films, or family and church politics. Viewers drawn here seek inspiration, empowerment, and the drama of real lives unfolding on and off stage. It often requires a buy-in with the central figure. Whether it be an appeal to fans or audiences with a passing interest, they thrive off and foster a healthy parasocial bond with the protagonist.",
+            "genres": ["Documentary", "Reality", "Biographical Drama"],
+            "subgenres": ["Travel Documentary", "Celebrity Reality", "Concert Film"],
+            "tropes": ["behind-the-scenes", "church politics", "family secrets", "redemption arcs"]
+        },
+        9: {
+            "name": "Crime and Dynasty Family Sagas",
+            "subtitle": "Empires, Loyalty, and Betrayal",
+            "description": "Crime sagas, western thrillers, and biographical dramas centered on family empires, hidden identities, and power struggles. These narratives often pit family loyalty against personal ambition, explore old money versus new money, and spotlight female empowerment within dynasties and industries. Rather than focus on one singular character, they are more focused on the ensemble at play. Viewers here enjoy sprawling stories where wealth, crime, and reputation come with high emotional and moral stakes.",
+            "genres": ["Crime Drama", "Western", "Biographical Drama"],
+            "subgenres": ["Family Saga", "Thriller", "Music Biopic"],
+            "tropes": ["family loyalty vs personal ambition", "female empowerment", "family dynasties", "old money vs new money", "hidden identities"]
+        },
+        10: {
+            "name": "Legal Battles and Female Bonds",
+            "subtitle": "Justice, Friendship, and Defiance",
+            "description": "Legal dramas, comedy-dramas, and biographical stories centered on the pursuit of justice and the bonds of sisterhood. These narratives highlight women navigating divorce, friendship, wrongful convictions, and David vs. Goliath legal battles. Whether explicitly or not, these series play off of the feeling of a 'rigged system' and find catharsis in the ways the protagonists overcome adversity. Viewers drawn here connect with empowering tales of resilience, whether in the courtroom, the music industry, or the struggles of personal relationships.",
+            "genres": ["Legal Drama", "Comedy-Drama", "Biographical Drama"],
+            "subgenres": ["Crime Drama", "Relationship Drama", "Legal Drama"],
+            "tropes": ["female friendship", "divorce", "artist-label relationships", "federal investigation", "personal transformation"]
+        },
+        11: {
+            "name": "Holiday Romance and Wish Fulfillment",
+            "subtitle": "Magic, Love, and Second Chances",
+            "description": "Romantic comedies, holiday films, and dramas steeped in wish fulfillment, festive magic, and second chances. From small-town Christmas romances to sugar relationship dramas, these stories deliver warmth, love, and emotional renewal. Viewers drawn here enjoy escapist tales where love is tested, rekindled, or discovered during the most magical of seasons. Less interested in satire or comedy and more on a pleasant, easy watching vibe.",
+            "genres": ["Comedy", "Holiday", "Drama"],
+            "subgenres": ["Romantic Comedy", "Romance", "Drama"],
+            "tropes": ["wish fulfillment", "holiday magic", "sugar daddy relationships", "female friendship", "small town Christmas"]
+        }
+    }
+
+    # Create expandable sections for each cluster
+    for cluster_id in range(12):
+        cluster = CLUSTER_INFO[cluster_id]
+
+        with st.expander(f"**Cluster {cluster_id}: {cluster['name']}**"):
+            # Subtitle
+            st.markdown(f"### {cluster['subtitle']}")
+
+            # Description
+            st.markdown(f"{cluster['description']}")
+
+            st.markdown("---")
+
+            # Create three columns for organized display
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.markdown("**Dominant Genres**")
+                for genre in cluster['genres']:
+                    st.markdown(f"- {genre}")
+
+            with col2:
+                st.markdown("**Dominant Subgenres**")
+                for subgenre in cluster['subgenres']:
+                    st.markdown(f"- {subgenre}")
+
+            with col3:
+                st.markdown("**Common Tropes**")
+                for trope in cluster['tropes']:
+                    st.markdown(f"- {trope}")
+
+    # Add summary section at the bottom
+    st.markdown("---")
+    st.markdown("### Quick Reference")
+    st.markdown("Use this guide to understand which audience segments your content might resonate with most strongly.")
+
+    # Create a summary table
+    summary_data = []
+    for cluster_id in range(12):
+        cluster = CLUSTER_INFO[cluster_id]
+        summary_data.append({
+            "Cluster": f"{cluster_id}: {cluster['name']}",
+            "Primary Focus": cluster['subtitle'],
+            "Top Genres": ", ".join(cluster['genres'][:2])
+        })
+
+    summary_df = pd.DataFrame(summary_data)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
