@@ -4,7 +4,7 @@ import numpy as np
 import json
 from textwrap import dedent
 import os
-from groq import Groq
+import requests
 from dotenv import load_dotenv
 import joblib
 from urllib.parse import urlparse
@@ -91,13 +91,29 @@ def load_user_clusters():
     return pd.DataFrame(data)
 
 @st.cache_data(ttl=600)
-def load_cluster_summary():
-    """Get user counts per cluster"""
+def load_cluster_summary(target_total: int = 3_000_000):
+    """Get user counts per cluster, extrapolated to target total users"""
     try:
         user_clusters = load_user_clusters()
         if user_clusters.empty:
             return pd.DataFrame()
         df = user_clusters.groupby('cluster_id').size().reset_index(name='users')
+
+        # Calculate current total and extrapolate to target users
+        current_total = df['users'].sum()
+        scaling_factor = target_total / current_total
+
+        # Scale up proportionally
+        df['users'] = (df['users'] * scaling_factor).round().astype(int)
+
+        # Adjust to ensure exact target total (handle rounding errors)
+        actual_total = df['users'].sum()
+        if actual_total != target_total:
+            diff = target_total - actual_total
+            # Add/subtract difference to largest cluster
+            largest_cluster_idx = df['users'].idxmax()
+            df.loc[largest_cluster_idx, 'users'] += diff
+
         df['cluster_name'] = df['cluster_id'].astype(str).map(CLUSTER_LABELS)
         return df
     except Exception as e:
@@ -139,11 +155,12 @@ def get_taste_vocabulary():
         st.warning(f"Could not load taste vocabulary from database: {e}")
         return ""
 
+# Load environment variables (works with both .env files and Replit secrets)
+load_dotenv()
+
 # --- Load Models and Data (cached) ---
 @st.cache_resource
 def load_models():
-    load_dotenv()
-    
     # Load SentenceTransformer if available
     embedder = None
     if HAS_SENTENCE_TRANSFORMERS:
@@ -198,19 +215,38 @@ def extract_text_from_pdf(pdf_file) -> str:
         st.error(f"Error extracting text from PDF: {e}")
         return None
 
-def _call_llm(prompt: str, groq_model: str) -> str:
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    try:
-        chat_completion = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=groq_model,
-        )
-        return chat_completion.choices[0].message.content
-    except Exception as e:
-        st.error(f"Error calling Groq API: {e}")
+def _call_llm(prompt: str, model: str) -> str:
+    """Call OpenRouter API with the specified model"""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        st.error("OPENROUTER_API_KEY not found in environment variables")
         return None
 
-def llm_define_metadata_v2(script_text: str, content_type: str, groq_model: str) -> dict:
+    try:
+        response = requests.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            }
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result['choices'][0]['message']['content']
+    except Exception as e:
+        st.error(f"Error calling OpenRouter API: {e}")
+        return None
+
+def llm_define_metadata_v2(script_text: str, content_type: str, llm_model: str) -> dict:
     # In a real app, you might have a more robust way to get examples
     sample_examples = []
 
@@ -228,7 +264,7 @@ def llm_define_metadata_v2(script_text: str, content_type: str, groq_model: str)
         {script_text[:2000]}
         ---
     """)
-    summary = _call_llm(summary_prompt, groq_model)
+    summary = _call_llm(summary_prompt, llm_model)
     if not summary:
         return None
 
@@ -264,7 +300,7 @@ def llm_define_metadata_v2(script_text: str, content_type: str, groq_model: str)
         Now, provide the JSON output.
     """)
     try:
-        core_attrs_str = _call_llm(core_prompt, groq_model)
+        core_attrs_str = _call_llm(core_prompt, llm_model)
         if core_attrs_str is None:
             return None
         core_attrs = json.loads(core_attrs_str)
@@ -310,7 +346,7 @@ def llm_define_metadata_v2(script_text: str, content_type: str, groq_model: str)
         Now, provide the JSON output.
     """)
     try:
-        detailed_attrs_str = _call_llm(detailed_prompt, groq_model)
+        detailed_attrs_str = _call_llm(detailed_prompt, llm_model)
         if detailed_attrs_str is None:
             return None
         detailed_attrs = json.loads(detailed_attrs_str)
@@ -324,17 +360,120 @@ def llm_define_metadata_v2(script_text: str, content_type: str, groq_model: str)
                                   f"Diff: {metadata.get('Differential','')} | Protagonist: {metadata.get('Protagonist_Demo','')}")
     return metadata
 
+def llm_validate_predictions(
+    predictions_df: pd.DataFrame,
+    metadata: dict,
+    llm_model: str
+) -> pd.DataFrame:
+    """
+    Use LLM to validate and adjust model predictions based on content understanding
+    and BET+ audience fit.
+    """
+    # Prepare cluster predictions for LLM
+    cluster_predictions = []
+    for _, row in predictions_df.iterrows():
+        cluster_id = int(row['cluster_id'])
+        cluster_name = CLUSTER_LABELS.get(str(cluster_id), f"Cluster {cluster_id}")
+        cluster_predictions.append({
+            'cluster_id': cluster_id,
+            'cluster_name': cluster_name,
+            'model_prediction': float(row['p_adopt'])
+        })
+
+    validation_prompt = dedent(f"""
+        You are an expert content strategist for BET+, a streaming platform focused on Black entertainment and culture.
+
+        PLATFORM CONTEXT:
+        BET+ serves a primarily Black American audience and features content including:
+        - Black stories, perspectives, and talent
+        - Urban contemporary entertainment
+        - Faith-based and family content
+        - R&B, hip-hop, and Black music culture
+        - Black romance, drama, and comedy
+        - True crime and documentaries featuring Black communities
+        - Legacy content from BET network
+
+        CONTENT TO EVALUATE:
+        Title: {metadata.get('FRANCHISE_TITLE', 'Unknown')}
+        Genre: {metadata.get('Genre', 'Unknown')}
+        Subgenre: {metadata.get('Subgenre', 'Unknown')}
+        Tonal Comps: {metadata.get('Tonal_Comps', 'None provided')}
+        Tropes: {metadata.get('Shared_Tropes', 'None provided')}
+        Differential: {metadata.get('Differential', 'None provided')}
+        Protagonist: {metadata.get('Protagonist_Demo', 'Unknown')}
+
+        MODEL PREDICTIONS:
+        Our ML model predicted these engagement probabilities for each audience cluster:
+        {json.dumps(cluster_predictions, indent=2)}
+
+        TASK:
+        The model has known issues with cluster overlap and may not accurately reflect BET+ audience preferences.
+        Please review each prediction and suggest adjustments based on:
+        1. Content relevance to Black culture and BET+ audience
+        2. Star power and cultural recognition (e.g., Marvel, Tyler Perry, major Black stars)
+        3. Genre appeal to specific clusters
+        4. Realistic engagement expectations
+
+        GUIDELINES:
+        - High-profile Black content (Marvel with Black leads, Tyler Perry, etc.) should score 0.7-0.9 across multiple clusters
+        - Abstract/niche content should score 0.3-0.5
+        - Content misaligned with BET+ audience should score 0.1-0.3
+        - Faith-based content should boost "Faith-Tinged, Family-Focused Comedy" scores
+        - Reality/documentary should boost reality and documentary clusters
+        - Romantic content should boost romance clusters
+        - Crime/thriller should boost crime saga and thriller clusters
+
+        OUTPUT FORMAT:
+        Return ONLY a valid JSON object with this structure (no other text):
+        {{
+            "adjustments": [
+                {{"cluster_id": 0, "adjusted_prediction": 0.75}},
+                {{"cluster_id": 1, "adjusted_prediction": 0.45}},
+                ...
+            ]
+        }}
+
+        Provide adjusted predictions for ALL {len(cluster_predictions)} clusters.
+    """)
+
+    try:
+        llm_response = _call_llm(validation_prompt, llm_model)
+        if llm_response is None:
+            # Silently fall back to original predictions
+            return predictions_df
+
+        adjustments_data = json.loads(llm_response)
+        adjustments = adjustments_data.get('adjustments', [])
+
+        # Create adjustment mapping
+        adjustment_map = {adj['cluster_id']: adj['adjusted_prediction'] for adj in adjustments}
+
+        # Apply adjustments
+        validated_df = predictions_df.copy()
+        validated_df['p_adopt_original'] = validated_df['p_adopt']
+        validated_df['p_adopt'] = validated_df['cluster_id'].map(
+            lambda cid: np.clip(adjustment_map.get(cid, validated_df[validated_df['cluster_id'] == cid]['p_adopt'].iloc[0]), 0.0, 1.0)
+        )
+
+        return validated_df.sort_values('p_adopt', ascending=False)
+
+    except (json.JSONDecodeError, KeyError, Exception) as e:
+        # Silently fall back to original predictions
+        return predictions_df
+
 def predict_from_metadata(
     approved_metadata: dict,
     trained_models: dict,
     centroids: dict,
     embedder_model: object,
-    cluster_summary_df: pd.DataFrame
+    cluster_summary_df: pd.DataFrame,
+    use_llm_validation: bool = False,
+    llm_model: str = None
 ):
     if embedder_model is None:
         st.error("Cannot make predictions without embedder model. Please install sentence-transformers and restart the app.")
         return pd.DataFrame()
-    
+
     content_embedding = embedder_model.encode([approved_metadata['embedding_text']])[0]
     content_embedding = content_embedding / (np.linalg.norm(content_embedding) + 1e-12)
 
@@ -358,6 +497,10 @@ def predict_from_metadata(
         if 'users' in scores_df.columns:
             scores_df = scores_df.drop(columns=['users'])
 
+    # Apply LLM validation if requested
+    if use_llm_validation and llm_model:
+        scores_df = llm_validate_predictions(scores_df, approved_metadata, llm_model)
+
     return scores_df.sort_values('p_adopt', ascending=False)
 
 def compute_roi_value(pred_df: pd.DataFrame, user_counts: pd.DataFrame, avg_completion: float = 0.5) -> float:
@@ -367,15 +510,29 @@ def compute_roi_value(pred_df: pd.DataFrame, user_counts: pd.DataFrame, avg_comp
     value = expected_adopters * VALUE_PER_ADOPTER * avg_completion
     return value
 
-def predict_roi(metadata: dict, budget: float, trained_models: dict, centroids: dict, embedder_model: object) -> dict:
+def determine_budget_tier(budget: float, content_type: str) -> str:
+    """Determine if this is a high-budget (top tier) investment based on industry standards."""
+    # High-budget thresholds based on content type
+    if content_type == "Feature Film":
+        # Feature films: $50M+ is high-budget
+        return "high" if budget >= 50_000_000 else "standard"
+    else:
+        # TV Shows: $5M+ per episode or $50M+ total is high-budget
+        return "high" if budget >= 5_000_000 else "standard"
+
+def predict_roi(metadata: dict, budget: float, content_type: str, trained_models: dict, centroids: dict, embedder_model: object, use_llm_validation: bool = False, llm_model: str = None) -> dict:
     """Predict ROI for a script given budget."""
-    # Get predictions
-    user_counts = load_cluster_summary()
+    # Determine budget tier and set appropriate population total
+    budget_tier = determine_budget_tier(budget, content_type)
+    target_population = 3_000_000 if budget_tier == "high" else 600_000
+
+    # Get predictions with appropriate population size
+    user_counts = load_cluster_summary(target_total=target_population)
     if user_counts.empty:
         st.error("Could not load user data for ROI calculation")
         return None
 
-    pred_df = predict_from_metadata(metadata, trained_models, centroids, embedder_model, user_counts)
+    pred_df = predict_from_metadata(metadata, trained_models, centroids, embedder_model, user_counts, use_llm_validation, llm_model)
 
     # Calculate value using budget as the cost
     estimated_value = compute_roi_value(pred_df, user_counts)
@@ -395,7 +552,9 @@ def predict_roi(metadata: dict, budget: float, trained_models: dict, centroids: 
         'net_profit': net_profit,
         'roi_percentage': roi_percentage,
         'expected_adopters': expected_adopters,
-        'pred_df': pred_df
+        'pred_df': pred_df,
+        'budget_tier': budget_tier,
+        'target_population': target_population
     }
 
 
@@ -665,7 +824,7 @@ if 'predictions' not in st.session_state:
 if 'roi_results' not in st.session_state:
     st.session_state.roi_results = None
 
-groq_model = "moonshotai/kimi-k2-instruct-0905"  # Hidden from UI
+llm_model = "x-ai/grok-4-fast:free"  # Hidden from UI - using OpenRouter
 
 # ==================== TAB 1: ENGAGEMENT PREDICTOR ====================
 with tab1:
@@ -699,6 +858,9 @@ with tab1:
 
     content_type = st.radio("Select Content Type", ["TV Show", "Feature Film"], horizontal=True)
 
+    # LLM validation always enabled (hidden from user)
+    use_llm_validation = True
+
     if uploaded_files and st.button("Generate Metadata"):
         script_text = ""
 
@@ -715,7 +877,7 @@ with tab1:
 
         if script_text.strip():
             with st.spinner("Generating metadata..."):
-                st.session_state.metadata = llm_define_metadata_v2(script_text, content_type, groq_model)
+                st.session_state.metadata = llm_define_metadata_v2(script_text, content_type, llm_model)
             st.session_state.predictions = None
         else:
             st.error("No text could be extracted from the uploaded files.")
@@ -733,15 +895,25 @@ with tab1:
 
         st.session_state.metadata = edited_metadata
 
-        if st.button("Run Prediction"):
-            with st.spinner("Running prediction..."):
-                st.session_state.predictions = predict_from_metadata(
-                    st.session_state.metadata,
-                    trained_models,
-                    centroids,
-                    embedder,
-                    cluster_summary_df
-                )
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("Run Prediction"):
+                with st.spinner("Running prediction..."):
+                    st.session_state.predictions = predict_from_metadata(
+                        st.session_state.metadata,
+                        trained_models,
+                        centroids,
+                        embedder,
+                        cluster_summary_df,
+                        use_llm_validation=use_llm_validation,
+                        llm_model=llm_model
+                    )
+        with col2:
+            if st.button("🔄 Retry", help="Metadata missed the mark? Try running it again"):
+                # Clear metadata to force regeneration
+                st.session_state.metadata = None
+                st.session_state.predictions = None
+                st.rerun()
 
     # --- 3. Visualize Output ---
     if st.session_state.predictions is not None:
@@ -795,16 +967,25 @@ with tab1:
         st.metric("Engagement Score", f"{engagement_index:.0%}", help="Average engagement probability of top 3 audience clusters")
 
         st.markdown("---")
+        st.markdown("<div style='margin-top: 40px;'></div>", unsafe_allow_html=True)
 
         # Detailed breakdown
         st.subheader("Audience Engagement Breakdown")
+        st.markdown("<div style='margin-bottom: 30px;'></div>", unsafe_allow_html=True)
 
         # Create a 3x4 grid with better visual hierarchy
         cols = st.columns(4)
 
+        def truncate_label(text: str, max_length: int = 35) -> str:
+            """Truncate text to max_length characters, adding ellipsis if needed."""
+            if len(text) <= max_length:
+                return text
+            return text[:max_length-3] + "..."
+
         for i, row in enumerate(sorted_predictions.itertuples()):
             cluster_id = str(row.cluster_id)
             label = CLUSTER_LABELS.get(cluster_id, f"Cluster {cluster_id}")
+            truncated_label = truncate_label(label)
             p_adopt = row.p_adopt
 
             # Highlight top 3 clusters
@@ -812,12 +993,21 @@ with tab1:
 
             with cols[i % 4]:
                 if is_top_3:
-                    st.markdown(f"<div style='margin-bottom: 10px;'><strong>TOP: {label}</strong></div>", unsafe_allow_html=True)
-                st.metric(label=label if not is_top_3 else "", value=f"{p_adopt:.0%}")
+                    st.markdown(f"<div style='margin-bottom: 10px;'><strong>TOP: {truncated_label}</strong></div>", unsafe_allow_html=True)
+                st.metric(label=truncated_label if not is_top_3 else "", value=f"{p_adopt:.0%}", help=label if len(label) > 35 else None)
 
         # Optional: Show detailed table in expander
         with st.expander("View Detailed Data"):
-            st.dataframe(st.session_state.predictions, use_container_width=True)
+            # Add cluster names and hide p_adopt_original
+            display_df = st.session_state.predictions.copy()
+            display_df['cluster_name'] = display_df['cluster_id'].astype(str).map(CLUSTER_LABELS)
+
+            # Reorder columns and drop p_adopt_original if it exists
+            cols_to_show = ['cluster_id', 'cluster_name', 'p_adopt']
+            if 'p_adopt_original' in display_df.columns:
+                display_df = display_df[cols_to_show]
+
+            st.dataframe(display_df, use_container_width=True)
 
 # ==================== TAB 2: ROI PREDICTOR ====================
 with tab2:
@@ -850,10 +1040,15 @@ with tab2:
 
     roi_content_type = st.radio("Select Content Type", ["TV Show", "Feature Film"], horizontal=True, key="roi_content_type")
 
+    # LLM validation always enabled (hidden from user)
+    roi_use_llm_validation = True
+
     # --- 2. Budget Input ---
     budget = st.number_input("Enter Budget ($)", min_value=0, value=100000, step=10000)
 
-    if roi_uploaded_files and st.button("Analyze ROI", key="roi_analyze"):
+    analyze_clicked = st.button("Analyze ROI", key="roi_analyze")
+
+    if roi_uploaded_files and analyze_clicked:
         script_text = ""
 
         # Process all uploaded files
@@ -870,15 +1065,18 @@ with tab2:
         if script_text.strip():
             with st.spinner("Analyzing script and calculating ROI..."):
                 # Generate metadata
-                roi_metadata = llm_define_metadata_v2(script_text, roi_content_type, groq_model)
+                roi_metadata = llm_define_metadata_v2(script_text, roi_content_type, llm_model)
                 if roi_metadata:
                     # Calculate ROI
                     st.session_state.roi_results = predict_roi(
                         roi_metadata,
                         budget,
+                        roi_content_type,
                         trained_models,
                         centroids,
-                        embedder
+                        embedder,
+                        use_llm_validation=roi_use_llm_validation,
+                        llm_model=llm_model
                     )
                 else:
                     st.error("Failed to generate metadata from script")
@@ -927,8 +1125,10 @@ with tab2:
         with col5:
             st.metric("Expected Adopters", f"{results['expected_adopters']:,.0f}")
 
-        # Show budget being used
-        st.info(f"Analysis based on acquisition budget of ${budget:,.0f}")
+        # Show budget and population tier information
+        tier_label = "High-Budget (Top Tier)" if results.get('budget_tier') == "high" else "Standard Budget"
+        population_label = f"{results.get('target_population', 600000):,}"
+        st.info(f"**{tier_label}** investment - Analysis based on ${budget:,.0f} budget with {population_label} target population")
 
         st.markdown("---")
 
