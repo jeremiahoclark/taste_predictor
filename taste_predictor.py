@@ -20,20 +20,37 @@ except ImportError:
     HAS_SENTENCE_TRANSFORMERS = False
     SentenceTransformer = None
 
+# Handle PDF OCR dependencies
+try:
+    import PyPDF2
+    from pdf2image import convert_from_bytes
+    import pytesseract
+    from PIL import Image
+    HAS_PDF_SUPPORT = True
+except ImportError:
+    HAS_PDF_SUPPORT = False
+
+# Handle database dependencies
+try:
+    import psycopg2
+    HAS_DB_SUPPORT = True
+except ImportError:
+    HAS_DB_SUPPORT = False
+
 # --- Hardcoded Cluster Labels ---
 CLUSTER_LABELS = {
-  "0": "romance_thriller_darkcomedy",
-  "1": "animated_comedy_satire",
-  "2": "reality_comedy",
-  "3": "animated_superhero",
-  "4": "reality_glam_conflict",
-  "5": "black_romance",
-  "6": "biopic_drama",
-  "7": "madea_comedy",
-  "8": "celebrity_doc_music_drama",
-  "9": "legacy_crime_empire",
-  "10": "legal_justice_truth",
-  "11": "holiday_family"
+  "0": "Romance-Infused, Suspense-Driven Stories",
+  "1": "Celebrity-and Culture-Driven Comedy",
+  "2": "Reality-Driven, Socially Chaotic Comedy",
+  "3": "Hidden Identity, Crime, and Supernatural Thrills",
+  "4": "Adult Relationship and Life-Stage Stories",
+  "5": "Community, Music, and Relationship Stories",
+  "6": "Ambition, Fame, and Erotic Thrillers",
+  "7": "Faith-Tinged, Family-Focused Comedy",
+  "8": "Star-and Legacy-Centered Documentary",
+  "9": "Crime and Dynasty Family Sagas",
+  "10": "Legal Battles and Female Bonds",
+  "11": "Holiday Romance and Wish Fulfillment"
 }
 
 # --- ROI Configuration ---
@@ -80,10 +97,47 @@ def load_cluster_summary():
         user_clusters = load_user_clusters()
         if user_clusters.empty:
             return pd.DataFrame()
-        return user_clusters.groupby('cluster_id').size().reset_index(name='users')
+        df = user_clusters.groupby('cluster_id').size().reset_index(name='users')
+        df['cluster_name'] = df['cluster_id'].astype(str).map(CLUSTER_LABELS)
+        return df
     except Exception as e:
         st.error(f"Error loading cluster summary: {e}")
         return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def get_taste_vocabulary():
+    """Fetch all unique taste tags from the database to guide LLM metadata generation"""
+    if not HAS_DB_SUPPORT:
+        return ""
+
+    try:
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            return ""
+
+        conn = psycopg2.connect(database_url)
+        cur = conn.cursor()
+
+        # Get all taste descriptions
+        cur.execute('SELECT taste_descriptions FROM taste_descriptions')
+        rows = cur.fetchall()
+
+        # Extract all unique tags
+        all_tags = set()
+        for (desc,) in rows:
+            if desc:
+                tags = [tag.strip() for tag in desc.split(',')]
+                all_tags.update(tags)
+
+        cur.close()
+        conn.close()
+
+        # Sort and format for prompt
+        sorted_tags = sorted(all_tags)
+        return ", ".join(sorted_tags)
+    except Exception as e:
+        st.warning(f"Could not load taste vocabulary from database: {e}")
+        return ""
 
 # --- Load Models and Data (cached) ---
 @st.cache_resource
@@ -115,6 +169,35 @@ embedder, trained_models, centroids, cluster_summary_df = load_models()
 
 # --- Functions from Notebook (adapted for Streamlit) ---
 
+def extract_text_from_pdf(pdf_file) -> str:
+    """Extract text from PDF using PyPDF2, fallback to OCR if needed."""
+    if not HAS_PDF_SUPPORT:
+        st.error("PDF support not available. Please install PyPDF2, pdf2image, and pytesseract.")
+        return None
+
+    try:
+        # First try PyPDF2 for text extraction
+        pdf_bytes = pdf_file.read()
+        pdf_file.seek(0)  # Reset file pointer
+
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+
+        # If text extraction yielded very little text, try OCR
+        if len(text.strip()) < 100:
+            st.info("PDF appears to be image-based. Running OCR (this may take a moment)...")
+            images = convert_from_bytes(pdf_bytes)
+            text = ""
+            for i, image in enumerate(images):
+                text += pytesseract.image_to_string(image) + "\n"
+
+        return text.strip()
+    except Exception as e:
+        st.error(f"Error extracting text from PDF: {e}")
+        return None
+
 def _call_llm(prompt: str, groq_model: str) -> str:
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     try:
@@ -131,6 +214,9 @@ def llm_define_metadata_v2(script_text: str, content_type: str, groq_model: str)
     # In a real app, you might have a more robust way to get examples
     sample_examples = []
 
+    # Get taste vocabulary from database
+    taste_vocab = get_taste_vocabulary()
+
     summary_prompt = dedent(f"""
         You are a professional script reader for a major studio.
         Your task is to summarize the following script in 3-4 concise sentences.
@@ -146,12 +232,25 @@ def llm_define_metadata_v2(script_text: str, content_type: str, groq_model: str)
     if not summary:
         return None
 
+    # Build vocabulary guidance for the prompt
+    vocab_guidance = ""
+    if taste_vocab:
+        vocab_guidance = f"""
+
+        TASTE VOCABULARY REFERENCE:
+        When describing Genre and Subgenre, try to reuse existing genre categories and descriptive tags from our content library when possible. Here are the taste descriptors we use:
+        {taste_vocab}
+
+        Use these tags to inform your Genre and Subgenre choices. For Genre, use primary categories like "Romance", "Thriller", "Drama", "Comedy", "Horror", "Action", etc. For Subgenre, combine relevant tags that capture the specific flavor (e.g., "Romantic comedy", "Black family drama", "Holiday romance", "Crime thriller", etc.).
+        """
+
     core_fields = ['FRANCHISE_TITLE', 'logline', 'Genre', 'Subgenre', 'CONTENT_TYPE']
     core_prompt = dedent(f"""
         You are a professional script analyst and development executive. Your task is to read a script summary and extract its core creative DNA.
 
         TASK:
         Analyze the provided script summary and identify its core attributes.
+        {vocab_guidance}
 
         OUTPUT FORMAT:
         Your response MUST be a single, valid JSON object. Do not include any other text, preamble, or explanation.
@@ -174,15 +273,29 @@ def llm_define_metadata_v2(script_text: str, content_type: str, groq_model: str)
         return None
 
     detailed_fields = ['Tonal_Comps', 'Shared_Tropes', 'Differential', 'Protagonist_Demo']
+
+    # Add vocabulary guidance for detailed attributes
+    detailed_vocab_guidance = ""
+    if taste_vocab:
+        detailed_vocab_guidance = f"""
+
+        TASTE VOCABULARY REFERENCE:
+        When identifying Shared_Tropes, use descriptive tags from our content library vocabulary when possible. Here are examples of tropes and themes we recognize:
+        {taste_vocab}
+
+        These tags represent common themes, settings, character types, tones, and narrative elements. Use them to describe the story's tropes in familiar terms.
+        """
+
     detailed_prompt = dedent(f"""
         You are a professional script analyst and development executive. Your task is to read a script summary and its core attributes, then extract detailed descriptive elements.
 
         TASK:
         Analyze the provided summary and core attributes to identify deeper creative and demographic details.
         - For 'Tonal_Comps', list 3-5 existing movies or TV shows with a similar tone and feel.
-        - For 'Shared_Tropes', identify 3-5 common narrative tropes or themes present in the story.
+        - For 'Shared_Tropes', identify 3-5 common narrative tropes or themes present in the story. Use concise, descriptive tags.
         - For 'Differential', explain in one sentence what makes this concept unique or fresh.
         - For 'Protagonist_Demo', describe the main character(s) including age, gender, and profession if known.
+        {detailed_vocab_guidance}
 
         OUTPUT FORMAT:
         Your response MUST be a single, valid JSON object. Do not include any other text, preamble, or explanation.
@@ -254,40 +367,6 @@ def compute_roi_value(pred_df: pd.DataFrame, user_counts: pd.DataFrame, avg_comp
     value = expected_adopters * VALUE_PER_ADOPTER * avg_completion
     return value
 
-def estimate_cost_from_metadata(metadata: dict) -> float:
-    """Estimate cost based on genre/subgenre with heuristics."""
-    # Cost estimation based on content type and genre
-    genre = metadata.get('Genre', '').lower()
-    content_type = metadata.get('CONTENT_TYPE', '').lower()
-
-    # Base costs by content type
-    if 'tv' in content_type or 'series' in content_type:
-        base_cost = 150000
-    else:  # Feature film
-        base_cost = 250000
-
-    # Genre multipliers
-    genre_multipliers = {
-        'action': 1.5,
-        'sci-fi': 1.4,
-        'fantasy': 1.4,
-        'thriller': 1.2,
-        'drama': 1.0,
-        'comedy': 0.9,
-        'romance': 0.8,
-        'documentary': 0.7,
-        'horror': 0.85,
-        'animation': 1.3
-    }
-
-    multiplier = 1.0
-    for key, value in genre_multipliers.items():
-        if key in genre:
-            multiplier = value
-            break
-
-    return base_cost * multiplier
-
 def predict_roi(metadata: dict, budget: float, trained_models: dict, centroids: dict, embedder_model: object) -> dict:
     """Predict ROI for a script given budget."""
     # Get predictions
@@ -298,16 +377,13 @@ def predict_roi(metadata: dict, budget: float, trained_models: dict, centroids: 
 
     pred_df = predict_from_metadata(metadata, trained_models, centroids, embedder_model, user_counts)
 
-    # Calculate value and cost
+    # Calculate value using budget as the cost
     estimated_value = compute_roi_value(pred_df, user_counts)
-    estimated_cost = estimate_cost_from_metadata(metadata)
+    estimated_cost = budget  # Use user's budget input as the cost
 
     # Calculate ROI
     net_profit = estimated_value - estimated_cost
     roi_percentage = (net_profit / estimated_cost) * 100 if estimated_cost > 0 else 0
-
-    # Determine if within budget
-    within_budget = estimated_cost <= budget
 
     # Calculate expected adopters
     df_with_users = pred_df.merge(user_counts, on='cluster_id')
@@ -318,7 +394,6 @@ def predict_roi(metadata: dict, budget: float, trained_models: dict, centroids: 
         'estimated_value': estimated_value,
         'net_profit': net_profit,
         'roi_percentage': roi_percentage,
-        'within_budget': within_budget,
         'expected_adopters': expected_adopters,
         'pred_df': pred_df
     }
@@ -616,14 +691,34 @@ with tab1:
     """, unsafe_allow_html=True)
 
     # --- 1. Upload Script ---
-    uploaded_file = st.file_uploader("Upload a script file (.txt)", type="txt", key="engagement_upload")
+    uploaded_files = st.file_uploader("Upload script file(s) (.txt or .pdf)", type=["txt", "pdf"], key="engagement_upload", accept_multiple_files=True)
+
+    # Show alert for multiple files
+    if uploaded_files and len(uploaded_files) > 1:
+        st.info("Note: All uploaded documents should be for the same movie or series. They will be combined into a single analysis.")
+
     content_type = st.radio("Select Content Type", ["TV Show", "Feature Film"], horizontal=True)
 
-    if uploaded_file is not None and st.button("Generate Metadata"):
-        script_text = uploaded_file.read().decode("utf-8")
-        with st.spinner("Generating metadata..."):
-            st.session_state.metadata = llm_define_metadata_v2(script_text, content_type, groq_model)
-        st.session_state.predictions = None
+    if uploaded_files and st.button("Generate Metadata"):
+        script_text = ""
+
+        # Process all uploaded files
+        for uploaded_file in uploaded_files:
+            if uploaded_file.name.endswith('.pdf'):
+                # Extract text from PDF
+                pdf_text = extract_text_from_pdf(uploaded_file)
+                if pdf_text:
+                    script_text += pdf_text + "\n\n"
+            else:
+                # Read text file
+                script_text += uploaded_file.read().decode("utf-8") + "\n\n"
+
+        if script_text.strip():
+            with st.spinner("Generating metadata..."):
+                st.session_state.metadata = llm_define_metadata_v2(script_text, content_type, groq_model)
+            st.session_state.predictions = None
+        else:
+            st.error("No text could be extracted from the uploaded files.")
 
     # --- 2. Review and Edit Metadata ---
     if st.session_state.metadata:
@@ -747,28 +842,48 @@ with tab2:
     """, unsafe_allow_html=True)
 
     # --- 1. Upload Script ---
-    roi_uploaded_file = st.file_uploader("Upload a script file (.txt)", type="txt", key="roi_upload")
+    roi_uploaded_files = st.file_uploader("Upload script file(s) (.txt or .pdf)", type=["txt", "pdf"], key="roi_upload", accept_multiple_files=True)
+
+    # Show alert for multiple files
+    if roi_uploaded_files and len(roi_uploaded_files) > 1:
+        st.info("Note: All uploaded documents should be for the same movie or series. They will be combined into a single analysis.")
+
     roi_content_type = st.radio("Select Content Type", ["TV Show", "Feature Film"], horizontal=True, key="roi_content_type")
 
     # --- 2. Budget Input ---
     budget = st.number_input("Enter Budget ($)", min_value=0, value=100000, step=10000)
 
-    if roi_uploaded_file is not None and st.button("Analyze ROI", key="roi_analyze"):
-        script_text = roi_uploaded_file.read().decode("utf-8")
-        with st.spinner("Analyzing script and calculating ROI..."):
-            # Generate metadata
-            roi_metadata = llm_define_metadata_v2(script_text, roi_content_type, groq_model)
-            if roi_metadata:
-                # Calculate ROI
-                st.session_state.roi_results = predict_roi(
-                    roi_metadata,
-                    budget,
-                    trained_models,
-                    centroids,
-                    embedder
-                )
+    if roi_uploaded_files and st.button("Analyze ROI", key="roi_analyze"):
+        script_text = ""
+
+        # Process all uploaded files
+        for uploaded_file in roi_uploaded_files:
+            if uploaded_file.name.endswith('.pdf'):
+                # Extract text from PDF
+                pdf_text = extract_text_from_pdf(uploaded_file)
+                if pdf_text:
+                    script_text += pdf_text + "\n\n"
             else:
-                st.error("Failed to generate metadata from script")
+                # Read text file
+                script_text += uploaded_file.read().decode("utf-8") + "\n\n"
+
+        if script_text.strip():
+            with st.spinner("Analyzing script and calculating ROI..."):
+                # Generate metadata
+                roi_metadata = llm_define_metadata_v2(script_text, roi_content_type, groq_model)
+                if roi_metadata:
+                    # Calculate ROI
+                    st.session_state.roi_results = predict_roi(
+                        roi_metadata,
+                        budget,
+                        trained_models,
+                        centroids,
+                        embedder
+                    )
+                else:
+                    st.error("Failed to generate metadata from script")
+        else:
+            st.error("No text could be extracted from the uploaded files.")
 
     # --- 3. Display ROI Results ---
     if st.session_state.roi_results is not None:
@@ -812,11 +927,8 @@ with tab2:
         with col5:
             st.metric("Expected Adopters", f"{results['expected_adopters']:,.0f}")
 
-        # Budget Status
-        if results['within_budget']:
-            st.success(f"✓ This acquisition is within your ${budget:,.0f} budget")
-        else:
-            st.warning(f"⚠ This acquisition exceeds your ${budget:,.0f} budget by ${results['estimated_cost'] - budget:,.0f}")
+        # Show budget being used
+        st.info(f"Analysis based on acquisition budget of ${budget:,.0f}")
 
         st.markdown("---")
 
