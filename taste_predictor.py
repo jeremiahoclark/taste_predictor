@@ -973,14 +973,31 @@ with tab1:
         st.subheader("Audience Engagement Breakdown")
         st.markdown("<div style='margin-bottom: 30px;'></div>", unsafe_allow_html=True)
 
-        # Create a 3x4 grid with better visual hierarchy
-        cols = st.columns(4)
-
         def truncate_label(text: str, max_length: int = 35) -> str:
             """Truncate text to max_length characters, adding ellipsis if needed."""
             if len(text) <= max_length:
                 return text
             return text[:max_length-3] + "..."
+
+        # Display top 3 clusters in their own row
+        top_3_data = sorted_predictions.head(3)
+        top_cols = st.columns(3)
+
+        for idx, (i, row) in enumerate(top_3_data.iterrows()):
+            cluster_id = str(row['cluster_id'])
+            label = CLUSTER_LABELS.get(cluster_id, f"Cluster {cluster_id}")
+            truncated_label = truncate_label(label)
+            p_adopt = row['p_adopt']
+
+            with top_cols[idx]:
+                st.markdown(f"<div style='margin-bottom: 10px;'><strong>{idx + 1}. {truncated_label}</strong></div>", unsafe_allow_html=True)
+                st.metric(label="", value=f"{p_adopt:.0%}", help=label if len(label) > 35 else None)
+
+        # Add blank row for spacing
+        st.markdown("<div style='margin-top: 40px;'></div>", unsafe_allow_html=True)
+
+        # Create a 3x4 grid for all clusters
+        cols = st.columns(4)
 
         for i, row in enumerate(sorted_predictions.itertuples()):
             cluster_id = str(row.cluster_id)
@@ -988,13 +1005,8 @@ with tab1:
             truncated_label = truncate_label(label)
             p_adopt = row.p_adopt
 
-            # Highlight top 3 clusters
-            is_top_3 = i < 3
-
             with cols[i % 4]:
-                if is_top_3:
-                    st.markdown(f"<div style='margin-bottom: 10px;'><strong>TOP: {truncated_label}</strong></div>", unsafe_allow_html=True)
-                st.metric(label=truncated_label if not is_top_3 else "", value=f"{p_adopt:.0%}", help=label if len(label) > 35 else None)
+                st.metric(label=truncated_label, value=f"{p_adopt:.0%}", help=label if len(label) > 35 else None)
 
         # Optional: Show detailed table in expander
         with st.expander("View Detailed Data"):
