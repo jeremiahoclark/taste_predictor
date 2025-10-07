@@ -850,7 +850,7 @@ with tab1:
     """, unsafe_allow_html=True)
 
     # --- 1. Upload Script ---
-    uploaded_files = st.file_uploader("Upload script file(s) (.txt or .pdf)", type=["txt", "pdf"], key="engagement_upload", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Upload script / pitch file(s) (.txt or .pdf)", type=["txt", "pdf"], key="engagement_upload", accept_multiple_files=True)
 
     # Show alert for multiple files
     if uploaded_files and len(uploaded_files) > 1:
@@ -882,16 +882,45 @@ with tab1:
         else:
             st.error("No text could be extracted from the uploaded files.")
 
-    # --- 2. Review and Edit Metadata ---
+    # --- 2. Review and Edit Details ---
     if st.session_state.metadata:
-        st.subheader("Review and Edit Metadata")
+        st.subheader("Review and Edit Details")
+
+        # Define user-friendly labels for each field
+        field_labels = {
+            'FRANCHISE_TITLE': 'Franchise Title',
+            'logline': 'Logline',
+            'Genre': 'Genre',
+            'Subgenre': 'Subgenre',
+            'CONTENT_TYPE': 'TV Show or Feature Film?',
+            'Tonal_Comps': 'Similar Franchises / Tonal Comparables',
+            'Shared_Tropes': 'Key Tropes or Themes',
+            'Differential': 'Key Differentiators',
+            'Protagonist_Demo': "Protagonist's Background / Backstory",
+            'embedding_text': 'Summary'
+        }
 
         edited_metadata = {}
         for key, value in st.session_state.metadata.items():
-            if isinstance(value, list):
-                edited_metadata[key] = st.text_area(f"Edit {key}", ", ".join(map(str, value)), key=f"engagement_{key}").split(', ')
+            label = field_labels.get(key, key)
+
+            # Handle CONTENT_TYPE as dropdown
+            if key == 'CONTENT_TYPE':
+                options = ['TV Show', 'Feature Film']
+                default_index = 0
+                if isinstance(value, str):
+                    if 'Feature' in value or 'film' in value.lower():
+                        default_index = 1
+                edited_metadata[key] = st.selectbox(label, options=options, index=default_index, key=f"engagement_{key}")
+            # Make embedding_text read-only (disabled)
+            elif key == 'embedding_text':
+                st.text_area(label, value, key=f"engagement_{key}", disabled=True, help="Auto-generated summary of all fields above")
+                edited_metadata[key] = value  # Keep original value
+            # Handle other fields
+            elif isinstance(value, list):
+                edited_metadata[key] = st.text_area(label, ", ".join(map(str, value)), key=f"engagement_{key}").split(', ')
             else:
-                edited_metadata[key] = st.text_area(f"Edit {key}", value, key=f"engagement_{key}")
+                edited_metadata[key] = st.text_area(label, value, key=f"engagement_{key}")
 
         st.session_state.metadata = edited_metadata
 
@@ -909,7 +938,7 @@ with tab1:
                         llm_model=llm_model
                     )
         with col2:
-            if st.button("🔄 Retry", help="Metadata missed the mark? Try running it again"):
+            if st.button("🔄 Retry", help="Auto-generated details missed the mark? Try again."):
                 # Clear metadata to force regeneration
                 st.session_state.metadata = None
                 st.session_state.predictions = None
@@ -989,9 +1018,13 @@ with tab1:
             truncated_label = truncate_label(label)
             p_adopt = row['p_adopt']
 
+            # Get cluster description for tooltip
+            cluster_info = CLUSTER_INFO.get(int(cluster_id), {})
+            description = cluster_info.get('description', label if len(label) > 35 else None)
+
             with top_cols[idx]:
                 st.markdown(f"<div style='margin-bottom: 10px;'><strong>{idx + 1}. {truncated_label}</strong></div>", unsafe_allow_html=True)
-                st.metric(label="", value=f"{p_adopt:.0%}", help=label if len(label) > 35 else None)
+                st.metric(label="", value=f"{p_adopt:.0%}", help=description)
 
         # Add blank row for spacing
         st.markdown("<div style='margin-top: 40px;'></div>", unsafe_allow_html=True)
@@ -1005,21 +1038,24 @@ with tab1:
             truncated_label = truncate_label(label)
             p_adopt = row.p_adopt
 
+            # Get cluster description for tooltip
+            cluster_info = CLUSTER_INFO.get(int(cluster_id), {})
+            description = cluster_info.get('description', label if len(label) > 35 else None)
+
             with cols[i % 4]:
-                st.metric(label=truncated_label, value=f"{p_adopt:.0%}", help=label if len(label) > 35 else None)
+                st.metric(label=truncated_label, value=f"{p_adopt:.0%}", help=description)
 
         # Optional: Show detailed table in expander
         with st.expander("View Detailed Data"):
             # Add cluster names and hide p_adopt_original
             display_df = st.session_state.predictions.copy()
-            display_df['cluster_name'] = display_df['cluster_id'].astype(str).map(CLUSTER_LABELS)
+            display_df['Taste Cluster Name'] = display_df['cluster_id'].astype(str).map(CLUSTER_LABELS)
+            display_df['Probability of High Engagement'] = display_df['p_adopt']
 
-            # Reorder columns and drop p_adopt_original if it exists
-            cols_to_show = ['cluster_id', 'cluster_name', 'p_adopt']
-            if 'p_adopt_original' in display_df.columns:
-                display_df = display_df[cols_to_show]
+            # Select and reorder columns (drop cluster_id)
+            display_df = display_df[['Taste Cluster Name', 'Probability of High Engagement']]
 
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 # ==================== TAB 2: ROI PREDICTOR ====================
 with tab2:
@@ -1044,7 +1080,7 @@ with tab2:
     """, unsafe_allow_html=True)
 
     # --- 1. Upload Script ---
-    roi_uploaded_files = st.file_uploader("Upload script file(s) (.txt or .pdf)", type=["txt", "pdf"], key="roi_upload", accept_multiple_files=True)
+    roi_uploaded_files = st.file_uploader("Upload script / pitch file(s) (.txt or .pdf)", type=["txt", "pdf"], key="roi_upload", accept_multiple_files=True)
 
     # Show alert for multiple files
     if roi_uploaded_files and len(roi_uploaded_files) > 1:
