@@ -497,7 +497,7 @@ def predict_from_metadata(
 
     for cluster_id, centroid in sorted(centroids.items()):
         scores = {'cluster_id': int(cluster_id)}
-        X_B = np.concatenate([content_embedding, centroid]).reshape(1, -1)
+        X_B = np.concatenate([centroid, content_embedding]).reshape(1, -1)
         scores['p_adopt'] = np.clip(path_b_model.predict(X_B)[0], 0.0, 1.0)
         cluster_scores.append(scores)
 

@@ -98,7 +98,7 @@ for test in test_cases:
 
     cluster_scores = []
     for cluster_id, centroid in sorted(centroids.items()):
-        X_B = np.concatenate([embedding, centroid]).reshape(1, -1)
+        X_B = np.concatenate([centroid, embedding]).reshape(1, -1)
         p_adopt = np.clip(path_b_model.predict(X_B)[0], 0.0, 1.0)
         cluster_scores.append({
             'cluster_id': int(cluster_id),
