@@ -56,6 +56,7 @@ CLUSTER_LABELS = {
 # --- ROI Configuration ---
 VALUE_PER_ADOPTER = 5.0
 MONETIZATION_RATE = 0.01
+AVERAGE_COMPLETION_RATE = 0.5
 
 # --- Database Connection (using Replit's native DB or fallback to mock data) ---
 @st.cache_data(ttl=600)
@@ -514,7 +515,7 @@ def predict_from_metadata(
 
     return scores_df.sort_values('p_adopt', ascending=False)
 
-def compute_roi_value(pred_df: pd.DataFrame, user_counts: pd.DataFrame, avg_completion: float = 0.5) -> float:
+def compute_roi_value(pred_df: pd.DataFrame, user_counts: pd.DataFrame, avg_completion: float = AVERAGE_COMPLETION_RATE) -> float:
     """Compute predicted value from adoption predictions."""
     df = pred_df.merge(user_counts, on='cluster_id')
     expected_adopters = (df['p_adopt'] * df['users']).sum()
@@ -546,7 +547,8 @@ def predict_roi(metadata: dict, budget: float, content_type: str, trained_models
     pred_df = predict_from_metadata(metadata, trained_models, centroids, embedder_model, user_counts, use_llm_validation, llm_model)
 
     # Calculate value using budget as the cost
-    estimated_value = compute_roi_value(pred_df, user_counts)
+    avg_completion_rate = AVERAGE_COMPLETION_RATE
+    estimated_value = compute_roi_value(pred_df, user_counts, avg_completion=avg_completion_rate)
     estimated_cost = budget  # Use user's budget input as the cost
 
     # Calculate ROI
@@ -554,8 +556,24 @@ def predict_roi(metadata: dict, budget: float, content_type: str, trained_models
     roi_percentage = (net_profit / estimated_cost) * 100 if estimated_cost > 0 else 0
 
     # Calculate expected adopters
-    df_with_users = pred_df.merge(user_counts, on='cluster_id')
-    expected_adopters = (df_with_users['p_adopt'] * df_with_users['users']).sum()
+    df_with_users = pred_df.merge(user_counts[['cluster_id', 'users']], on='cluster_id', how='left')
+    df_with_users['users'] = df_with_users['users'].fillna(0)
+    if 'cluster_name' in df_with_users.columns:
+        df_with_users['cluster_name'] = df_with_users['cluster_name'].fillna(
+            df_with_users['cluster_id'].astype(str).map(CLUSTER_LABELS)
+        )
+    else:
+        df_with_users['cluster_name'] = df_with_users['cluster_id'].astype(str).map(CLUSTER_LABELS)
+
+    df_with_users['expected_adopters'] = df_with_users['p_adopt'] * df_with_users['users']
+    df_with_users['cluster_value'] = df_with_users['expected_adopters'] * VALUE_PER_ADOPTER * avg_completion_rate
+    if estimated_value > 0:
+        df_with_users['value_share'] = df_with_users['cluster_value'] / estimated_value
+    else:
+        df_with_users['value_share'] = 0.0
+
+    expected_adopters = df_with_users['expected_adopters'].sum()
+    cluster_breakdown = df_with_users.sort_values('cluster_value', ascending=False).reset_index(drop=True)
 
     return {
         'estimated_cost': estimated_cost,
@@ -565,7 +583,9 @@ def predict_roi(metadata: dict, budget: float, content_type: str, trained_models
         'expected_adopters': expected_adopters,
         'pred_df': pred_df,
         'budget_tier': budget_tier,
-        'target_population': target_population
+        'target_population': target_population,
+        'avg_completion_rate': avg_completion_rate,
+        'cluster_breakdown': cluster_breakdown
     }
 
 
@@ -1241,28 +1261,51 @@ with tab2:
         # Cluster Breakdown
         st.subheader("Value by Audience Cluster")
 
-        user_counts = load_cluster_summary()
-        if not user_counts.empty:
-            pred_with_users = results['pred_df'].merge(user_counts, on='cluster_id')
-            pred_with_users['expected_adopters'] = pred_with_users['p_adopt'] * pred_with_users['users']
-            pred_with_users['cluster_value'] = pred_with_users['expected_adopters'] * VALUE_PER_ADOPTER * 0.5
-            pred_with_users['cluster_name'] = pred_with_users['cluster_id'].astype(str).map(CLUSTER_LABELS)
-            pred_with_users = pred_with_users.sort_values('cluster_value', ascending=False)
+        cluster_breakdown = results.get('cluster_breakdown')
+        if cluster_breakdown is not None and not cluster_breakdown.empty:
+            total_value = float(cluster_breakdown['cluster_value'].sum())
+            total_share = float(cluster_breakdown['value_share'].sum())
+            value_diff = total_value - float(results['estimated_value'])
+
+            summary_cols = st.columns(2)
+            with summary_cols[0]:
+                st.metric("Cluster Value Sum", f"${total_value:,.0f}")
+            with summary_cols[1]:
+                st.metric("Value Coverage", f"{total_share:.0%}")
+
+            if abs(value_diff) <= 1:
+                st.caption(
+                    f"Clusters sum to ${total_value:,.0f}, aligning with the estimated value. "
+                    f"Value assumes ${VALUE_PER_ADOPTER:,.0f} per adopter at {results['avg_completion_rate']:.0%} "
+                    f"completion across {results['target_population']:,} potential viewers."
+                )
+            else:
+                st.warning(
+                    f"Cluster totals (${total_value:,.0f}) differ from the estimated value by ${value_diff:,.0f}. "
+                    "Check upstream assumptions or rounding."
+                )
 
             # Display top value clusters
             cols = st.columns(4)
-            for i, row in enumerate(pred_with_users.head(12).itertuples()):
+            for i, row in enumerate(cluster_breakdown.head(12).itertuples()):
                 with cols[i % 4]:
                     st.metric(
                         label=row.cluster_name if hasattr(row, 'cluster_name') else f"Cluster {row.cluster_id}",
                         value=f"${row.cluster_value:,.0f}",
-                        help=f"P(adopt): {row.p_adopt:.1%}, Users: {row.users:,}"
+                        help=(
+                            f"P(adopt): {row.p_adopt:.1%}, Share: {row.value_share:.1%}"
+                        )
                     )
 
         # Detailed table
         with st.expander("View Detailed Breakdown"):
-            if not user_counts.empty:
-                st.dataframe(pred_with_users[['cluster_name', 'p_adopt', 'users', 'expected_adopters', 'cluster_value']], use_container_width=True)
+            if cluster_breakdown is not None and not cluster_breakdown.empty:
+                display_columns = ['cluster_name', 'p_adopt', 'cluster_value', 'value_share']
+                display_breakdown = cluster_breakdown[display_columns].copy()
+                display_breakdown['p_adopt'] = display_breakdown['p_adopt'].map(lambda x: f"{x:.1%}")
+                display_breakdown['cluster_value'] = display_breakdown['cluster_value'].map(lambda x: f"${x:,.0f}")
+                display_breakdown['value_share'] = display_breakdown['value_share'].map(lambda x: f"{x:.1%}")
+                st.dataframe(display_breakdown, use_container_width=True)
 
 # ==================== TAB 3: CLUSTER GUIDE ====================
 with tab3:
