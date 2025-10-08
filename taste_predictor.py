@@ -1402,7 +1402,6 @@ with tab2:
 
     # --- 2. Budget Input ---
     budget = st.number_input("Enter Budget ($)", min_value=0, value=100000, step=10000)
-    st.caption("Standard budget tier benchmarks: under $5M episodic / $50M film = standard tier.")
 
     st.text_input(
         "Notable Cast / Director",
@@ -1605,10 +1604,7 @@ with tab2:
                 f"Baseline (pre-talent) forecast: value ${base_value:,.0f}, ROI {base_roi:.1f}%, net profit ${base_net_profit:,.0f}."
             )
 
-        # Show budget and population tier information
-        tier_label = "High-Budget (Top Tier)" if results.get('budget_tier') == "high" else "Standard Budget"
-        population_label = f"{results.get('target_population', 600000):,}"
-        st.info(f"**{tier_label}** investment - Analysis based on ${budget:,.0f} budget with {population_label} target population")
+        # Show budget and population tier information (removed for cleaner display)
 
         if talent_names:
             st.markdown("---")
@@ -1701,17 +1697,7 @@ with tab2:
             with summary_cols[1]:
                 st.metric("Value Coverage", f"{total_share:.0%}")
 
-            if abs(value_diff) <= 1:
-                st.caption(
-                    f"Clusters sum to ${total_value:,.0f}, aligning with the estimated value. "
-                    f"Value assumes ${VALUE_PER_ADOPTER:,.0f} per adopter at {results['avg_completion_rate']:.0%} "
-                    f"completion across {results['target_population']:,} potential viewers."
-                )
-            else:
-                st.warning(
-                    f"Cluster totals (${total_value:,.0f}) differ from the estimated value by ${value_diff:,.0f}. "
-                    "Check upstream assumptions or rounding."
-                )
+            # Removed validation messaging for cleaner display
 
             # Display top value clusters
             cols = st.columns(4)
