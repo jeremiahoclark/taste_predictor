@@ -246,18 +246,29 @@ def _call_llm(prompt: str, model: str) -> str:
         st.error(f"Error calling OpenRouter API: {e}")
         return None
 
-def llm_define_metadata_v2(script_text: str, content_type: str, llm_model: str) -> dict:
+def llm_define_metadata_v2(script_text: str, content_type: str, llm_model: str, retry_feedback: str = None) -> dict:
     # In a real app, you might have a more robust way to get examples
     sample_examples = []
 
     # Get taste vocabulary from database
     taste_vocab = get_taste_vocabulary()
 
+    # Add retry feedback if provided
+    retry_instruction = ""
+    if retry_feedback:
+        retry_instruction = f"""
+
+        IMPORTANT USER FEEDBACK FROM PREVIOUS ATTEMPT:
+        The user indicated the previous analysis was incorrect or incomplete. Please pay special attention to:
+        {retry_feedback}
+        """
+
     summary_prompt = dedent(f"""
         You are a professional script reader for a major studio.
         Your task is to summarize the following script in 3-4 concise sentences.
         Focus on the main plot, primary characters, setting, and overall tone.
         Do not add any preamble or explanation. Provide only the summary.
+        {retry_instruction}
 
         SCRIPT TEXT:
         ---
@@ -823,8 +834,47 @@ if 'predictions' not in st.session_state:
     st.session_state.predictions = None
 if 'roi_results' not in st.session_state:
     st.session_state.roi_results = None
+if 'retry_feedback' not in st.session_state:
+    st.session_state.retry_feedback = None
+if 'script_text' not in st.session_state:
+    st.session_state.script_text = None
+if 'content_type' not in st.session_state:
+    st.session_state.content_type = None
 
-llm_model = "x-ai/grok-4-fast:free"  # Hidden from UI - using OpenRouter
+llm_model = "x-ai/grok-4-fast"  # Hidden from UI - using OpenRouter
+
+# Dialog for retry feedback
+@st.dialog("Provide Feedback for Retry")
+def retry_dialog():
+    st.write("What would you like the AI to focus on or correct in the next attempt?")
+    feedback = st.text_area(
+        "Feedback",
+        placeholder="e.g., 'The genre is wrong, it should be a thriller not a comedy' or 'Focus more on the main character's motivation'",
+        height=150
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Submit & Retry", type="primary", use_container_width=True):
+            if feedback.strip():
+                st.session_state.retry_feedback = feedback
+                # Regenerate metadata with the stored script
+                if st.session_state.script_text:
+                    with st.spinner("Regenerating metadata with your feedback..."):
+                        st.session_state.metadata = llm_define_metadata_v2(
+                            st.session_state.script_text,
+                            st.session_state.content_type,
+                            llm_model,
+                            retry_feedback=feedback
+                        )
+                    st.session_state.predictions = None
+                    st.session_state.retry_feedback = None
+                st.rerun()
+            else:
+                st.warning("Please provide feedback before retrying.")
+    with col2:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
 
 # ==================== TAB 1: ENGAGEMENT PREDICTOR ====================
 with tab1:
@@ -876,9 +926,20 @@ with tab1:
                 script_text += uploaded_file.read().decode("utf-8") + "\n\n"
 
         if script_text.strip():
+            # Store script text and content type for potential retry
+            st.session_state.script_text = script_text
+            st.session_state.content_type = content_type
+
             with st.spinner("Generating metadata..."):
-                st.session_state.metadata = llm_define_metadata_v2(script_text, content_type, llm_model)
+                st.session_state.metadata = llm_define_metadata_v2(
+                    script_text,
+                    content_type,
+                    llm_model,
+                    retry_feedback=st.session_state.retry_feedback
+                )
             st.session_state.predictions = None
+            # Clear retry feedback after use
+            st.session_state.retry_feedback = None
         else:
             st.error("No text could be extracted from the uploaded files.")
 
@@ -939,10 +1000,7 @@ with tab1:
                     )
         with col2:
             if st.button("🔄 Retry", help="Auto-generated details missed the mark? Try again."):
-                # Clear metadata to force regeneration
-                st.session_state.metadata = None
-                st.session_state.predictions = None
-                st.rerun()
+                retry_dialog()
 
     # --- 3. Visualize Output ---
     if st.session_state.predictions is not None:
