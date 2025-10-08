@@ -10,6 +10,7 @@ import joblib
 from urllib.parse import urlparse
 import urllib.request
 import ssl
+from typing import List, Dict, Any, Optional
 
 # Handle optional ML dependencies gracefully
 try:
@@ -522,6 +523,232 @@ def compute_roi_value(pred_df: pd.DataFrame, user_counts: pd.DataFrame, avg_comp
     value = expected_adopters * VALUE_PER_ADOPTER * avg_completion
     return value
 
+
+def collect_talent_research(names: List[str], max_results: int = 3) -> Dict[str, List[Dict[str, Any]]]:
+    """Look up recent performance insights for notable talent using the Exa API."""
+    clean_names = [name.strip() for name in names if name and name.strip()]
+    if not clean_names:
+        return {}
+
+    api_key = os.getenv("EXA_API_KEY")
+    if not api_key:
+        st.info("Set EXA_API_KEY to enable Notable Cast / Director research.")
+        return {}
+
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-api-key": api_key
+    }
+    search_url = "https://api.exa.ai/search"
+
+    research: Dict[str, List[Dict[str, Any]]] = {}
+
+    for name in clean_names:
+        query = (
+            f"{name} box office performance OR streaming audience impact OR viewership track record"
+        )
+        payload = {
+            "query": query,
+            "type": "auto",
+            "numResults": max_results,
+            "contents": {
+                "text": True
+            }
+        }
+
+        try:
+            response = requests.post(search_url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            raw_results = response.json().get("results", [])
+        except Exception as exc:
+            st.warning(f"Exa search failed for {name}: {exc}")
+            research[name] = []
+            continue
+
+        normalized_results: List[Dict[str, Any]] = []
+        for item in raw_results:
+            title = item.get("title") or item.get("url") or "Untitled source"
+            snippet = item.get("text") or item.get("snippet") or ""
+            snippet = snippet.replace("\n", " ")
+            if len(snippet) > 500:
+                snippet = snippet[:497].rstrip() + "..."
+
+            normalized_results.append({
+                "title": title,
+                "url": item.get("url"),
+                "snippet": snippet,
+                "score": item.get("score"),
+                "publishedDate": item.get("publishedDate")
+            })
+
+        research[name] = normalized_results
+
+    return research
+
+
+def llm_estimate_talent_impact(
+    metadata: Dict[str, Any],
+    roi_baseline: Dict[str, Any],
+    talent_research: Dict[str, List[Dict[str, Any]]],
+    llm_model: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Estimate audience impact multipliers from notable talent using LLM synthesis."""
+    if not talent_research:
+        return None
+
+    if not llm_model:
+        st.warning("LLM model not configured; skipping talent impact synthesis.")
+        return None
+
+    # Build research digest for the prompt
+    digest_sections = []
+    for name, items in talent_research.items():
+        if not items:
+            digest_sections.append(f"{name}: no recent metrics surfaced.\n")
+            continue
+
+        bullet_points = []
+        for item in items:
+            title = item.get("title", "Untitled source")
+            snippet = item.get("snippet", "")
+            url = item.get("url") or ""
+            if url:
+                bullet_points.append(f"- {title}: {snippet} (Source: {url})")
+            else:
+                bullet_points.append(f"- {title}: {snippet}")
+
+        digest_sections.append(f"{name}:\n" + "\n".join(bullet_points[:max(1, min(3, len(bullet_points)))]))
+
+    research_digest = "\n\n".join(digest_sections)
+
+    title = metadata.get('FRANCHISE_TITLE', 'Untitled Project')
+    logline = metadata.get('logline', 'No logline provided.')
+    baseline_value = roi_baseline.get('estimated_value', 0.0)
+    baseline_roi = roi_baseline.get('roi_percentage', 0.0)
+    budget = roi_baseline.get('estimated_cost', 0.0)
+
+    prompt = dedent(f"""
+        You are an entertainment analytics strategist. Given a project baseline ROI forecast and
+        external research on lead actors or directors, estimate how notable talent might shift future performance.
+
+        PROJECT CONTEXT:
+        - Title: {title}
+        - Content Type: {metadata.get('CONTENT_TYPE', 'Unknown')}
+        - Logline: {logline}
+        - Baseline gross value: ${baseline_value:,.0f}
+        - Budget: ${budget:,.0f}
+        - Baseline ROI: {baseline_roi:.1f}%
+
+        TALENT RESEARCH (summaries of recent coverage, performance data, or comparable releases):
+        {research_digest}
+
+        TASK:
+        1. Infer how the combined star power is likely to influence adoption or value.
+        2. Express the effect as multipliers relative to the baseline estimate (1.0 = no change).
+        3. Provide a low case, expected case, and high case multiplier and call out uncertainties.
+
+        REQUIREMENTS:
+        - Return ONLY valid JSON with this schema:
+        {{
+            "overall_multiplier_low": 0.95,
+            "overall_multiplier_expected": 1.12,
+            "overall_multiplier_high": 1.28,
+            "confidence": "low|medium|high",
+            "assumptions": ["String"],
+            "talent_breakdown": [
+                {{
+                    "name": "Talent Name",
+                    "impact_direction": "positive|neutral|negative",
+                    "expected_change_pct": 12.5,
+                    "low_change_pct": 5.0,
+                    "high_change_pct": 20.0,
+                    "rationale": "One-sentence justification referencing the research"
+                }}
+            ]
+        }}
+        - Multipliers must be numeric, between 0.5 and 1.75.
+        - Percent fields represent percentage change relative to baseline (e.g., 12.5 = +12.5%).
+        - Include at least one assumption noting gaps in the research sample.
+        - If evidence suggests minimal impact, set all multipliers to 1.0.
+    """)
+
+    llm_response = _call_llm(prompt, llm_model)
+    if not llm_response:
+        return None
+
+    try:
+        parsed = json.loads(llm_response)
+        return parsed
+    except json.JSONDecodeError:
+        st.warning("Could not parse talent impact response from LLM. Showing baseline only.")
+        return None
+
+
+def derive_talent_adjustments(roi_baseline: Dict[str, Any], impact_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Translate LLM output into concrete ROI adjustments."""
+    if not impact_data:
+        return None
+
+    def _parse_multiplier(value: Any, default: float = 1.0) -> float:
+        try:
+            multiplier = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0.5, min(1.75, multiplier))
+
+    baseline_value = float(roi_baseline.get('estimated_value', 0.0))
+    budget = float(roi_baseline.get('estimated_cost', 0.0))
+
+    multiplier_low = _parse_multiplier(impact_data.get('overall_multiplier_low', 1.0))
+    multiplier_expected = _parse_multiplier(impact_data.get('overall_multiplier_expected', 1.0))
+    multiplier_high = _parse_multiplier(impact_data.get('overall_multiplier_high', 1.0))
+
+    value_low = baseline_value * multiplier_low
+    value_expected = baseline_value * multiplier_expected
+    value_high = baseline_value * multiplier_high
+
+    def _roi(value: float) -> float:
+        if budget <= 0:
+            return 0.0
+        return ((value - budget) / budget) * 100
+
+    adjustments = {
+        'multiplier_low': multiplier_low,
+        'multiplier_expected': multiplier_expected,
+        'multiplier_high': multiplier_high,
+        'value_low': value_low,
+        'value_expected': value_expected,
+        'value_high': value_high,
+        'roi_low': _roi(value_low),
+        'roi_expected': _roi(value_expected),
+        'roi_high': _roi(value_high),
+        'confidence': impact_data.get('confidence', 'medium'),
+        'assumptions': impact_data.get('assumptions', []),
+        'talent_breakdown': impact_data.get('talent_breakdown', [])
+    }
+
+    return adjustments
+
+
+def parse_notable_talent(raw_input: Optional[str]) -> List[str]:
+    """Convert user input into a deduplicated list of talent names."""
+    if not raw_input:
+        return []
+
+    normalized = raw_input.replace('\n', ',').replace(';', ',')
+    candidates = [name.strip() for name in normalized.split(',') if name and name.strip()]
+
+    deduped: List[str] = []
+    seen = set()
+    for name in candidates:
+        key = name.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(name)
+
+    return deduped
+
 def determine_budget_tier(budget: float, content_type: str) -> str:
     """Determine if this is a high-budget (top tier) investment based on industry standards."""
     # High-budget thresholds based on content type
@@ -860,6 +1087,10 @@ if 'script_text' not in st.session_state:
     st.session_state.script_text = None
 if 'content_type' not in st.session_state:
     st.session_state.content_type = None
+if 'roi_metadata' not in st.session_state:
+    st.session_state.roi_metadata = None
+if 'talent_results' not in st.session_state:
+    st.session_state.talent_results = None
 
 llm_model = "x-ai/grok-4-fast"  # Hidden from UI - using OpenRouter
 
@@ -1171,6 +1402,14 @@ with tab2:
 
     # --- 2. Budget Input ---
     budget = st.number_input("Enter Budget ($)", min_value=0, value=100000, step=10000)
+    st.caption("Standard budget tier benchmarks: under $5M episodic / $50M film = standard tier.")
+
+    st.text_input(
+        "Notable Cast / Director",
+        placeholder="Issa Rae, Ava DuVernay",
+        help="Optional. Add lead talent or directors to pull performance research and adjust ROI forecasts.",
+        key="roi_talent_input"
+    )
 
     analyze_clicked = st.button("Analyze ROI", key="roi_analyze")
 
@@ -1193,8 +1432,9 @@ with tab2:
                 # Generate metadata
                 roi_metadata = llm_define_metadata_v2(script_text, roi_content_type, llm_model)
                 if roi_metadata:
-                    # Calculate ROI
-                    st.session_state.roi_results = predict_roi(
+                    st.session_state.roi_metadata = roi_metadata
+
+                    results = predict_roi(
                         roi_metadata,
                         budget,
                         roi_content_type,
@@ -1204,6 +1444,76 @@ with tab2:
                         use_llm_validation=roi_use_llm_validation,
                         llm_model=llm_model
                     )
+
+                    if results:
+                        talent_names = parse_notable_talent(st.session_state.get('roi_talent_input', ''))
+
+                        talent_research = collect_talent_research(talent_names) if talent_names else {}
+                        talent_impact_raw = None
+                        talent_adjustments = None
+
+                        if talent_research:
+                            talent_impact_raw = llm_estimate_talent_impact(
+                                roi_metadata,
+                                results,
+                                talent_research,
+                                llm_model
+                            )
+                            if talent_impact_raw:
+                                talent_adjustments = derive_talent_adjustments(results, talent_impact_raw)
+
+                        if talent_adjustments:
+                            results.update({
+                                'estimated_value_adjusted': talent_adjustments['value_expected'],
+                                'estimated_value_low': talent_adjustments['value_low'],
+                                'estimated_value_high': talent_adjustments['value_high'],
+                                'roi_percentage_adjusted': talent_adjustments['roi_expected'],
+                                'roi_percentage_low': talent_adjustments['roi_low'],
+                                'roi_percentage_high': talent_adjustments['roi_high'],
+                                'net_profit_adjusted': talent_adjustments['value_expected'] - results['estimated_cost'],
+                                'expected_adopters_adjusted': results['expected_adopters'] * talent_adjustments['multiplier_expected'],
+                                'expected_adopters_low': results['expected_adopters'] * talent_adjustments['multiplier_low'],
+                                'expected_adopters_high': results['expected_adopters'] * talent_adjustments['multiplier_high'],
+                                'talent_multipliers': {
+                                    'low': talent_adjustments['multiplier_low'],
+                                    'expected': talent_adjustments['multiplier_expected'],
+                                    'high': talent_adjustments['multiplier_high']
+                                },
+                                'talent_assumptions': talent_adjustments.get('assumptions', []),
+                                'talent_breakdown': talent_adjustments.get('talent_breakdown', [])
+                            })
+                        else:
+                            results.update({
+                                'estimated_value_adjusted': None,
+                                'estimated_value_low': None,
+                                'estimated_value_high': None,
+                                'roi_percentage_adjusted': None,
+                                'roi_percentage_low': None,
+                                'roi_percentage_high': None,
+                                'net_profit_adjusted': None,
+                                'expected_adopters_adjusted': None,
+                                'expected_adopters_low': None,
+                                'expected_adopters_high': None,
+                                'talent_multipliers': None,
+                                'talent_assumptions': None,
+                                'talent_breakdown': None
+                            })
+
+                        results['talent_names'] = talent_names
+                        results['talent_research'] = talent_research
+                        results['talent_impact_raw'] = talent_impact_raw
+                        results['talent_adjustments'] = talent_adjustments
+
+                        st.session_state.talent_results = {
+                            'names': talent_names,
+                            'research': talent_research,
+                            'impact': talent_impact_raw,
+                            'adjustments': talent_adjustments
+                        }
+
+                        st.session_state.roi_results = results
+                    else:
+                        st.error("Failed to calculate ROI.")
                 else:
                     st.error("Failed to generate metadata from script")
         else:
@@ -1213,11 +1523,30 @@ with tab2:
     if st.session_state.roi_results is not None:
         results = st.session_state.roi_results
 
-        # Determine recommendation
-        if results['roi_percentage'] > 50:
+        talent_adjustments = results.get('talent_adjustments')
+        has_talent_impact = bool(talent_adjustments and results.get('estimated_value_adjusted'))
+        talent_names = results.get('talent_names', [])
+        talent_research = results.get('talent_research', {})
+
+        base_value = float(results.get('estimated_value', 0.0))
+        base_roi = float(results.get('roi_percentage', 0.0))
+        base_net_profit = float(results.get('net_profit', 0.0))
+        base_adopters = float(results.get('expected_adopters', 0.0))
+
+        def _resolve(value, fallback):
+            return float(value) if value is not None else float(fallback)
+
+        value_display = _resolve(results.get('estimated_value_adjusted') if has_talent_impact else None, base_value)
+        roi_display = _resolve(results.get('roi_percentage_adjusted') if has_talent_impact else None, base_roi)
+        net_profit_display = _resolve(results.get('net_profit_adjusted') if has_talent_impact else None, base_net_profit)
+        adopters_display = _resolve(results.get('expected_adopters_adjusted') if has_talent_impact else None, base_adopters)
+
+        roi_for_recommendation = roi_display
+
+        if roi_for_recommendation > 50:
             roi_recommendation = "Strong Investment"
             roi_color = "green"
-        elif results['roi_percentage'] > 0:
+        elif roi_for_recommendation > 0:
             roi_recommendation = "Moderate Investment"
             roi_color = "orange"
         else:
@@ -1234,27 +1563,126 @@ with tab2:
         """, unsafe_allow_html=True)
 
         # Key Metrics
+        value_delta_label = None
+        roi_delta_label = None
+        if has_talent_impact:
+            diff_value = value_display - base_value
+            diff_roi = roi_display - base_roi
+            if abs(diff_value) >= 1:
+                value_delta_label = f"{'+' if diff_value >= 0 else '-'}${abs(diff_value):,.0f} vs baseline"
+            if abs(diff_roi) >= 0.1:
+                roi_delta_label = f"{'+' if diff_roi >= 0 else '-'}{abs(diff_roi):.1f} pts vs baseline"
+
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Estimated Cost", f"${results['estimated_cost']:,.0f}")
         with col2:
-            st.metric("Estimated Value", f"${results['estimated_value']:,.0f}")
+            st.metric("Estimated Value", f"${value_display:,.0f}", delta=value_delta_label)
         with col3:
-            st.metric("ROI", f"{results['roi_percentage']:.1f}%")
+            st.metric("ROI", f"{roi_display:.1f}%", delta=roi_delta_label)
 
         st.markdown("---")
 
         # Additional Details
+        profit_delta_label = None
+        adopters_delta_label = None
+        if has_talent_impact:
+            diff_profit = net_profit_display - base_net_profit
+            diff_adopters = adopters_display - base_adopters
+            if abs(diff_profit) >= 1:
+                profit_delta_label = f"{'+' if diff_profit >= 0 else '-'}${abs(diff_profit):,.0f} vs baseline"
+            if abs(diff_adopters) >= 1:
+                adopters_delta_label = f"{'+' if diff_adopters >= 0 else '-'}{abs(diff_adopters):,.0f} vs baseline"
+
         col4, col5 = st.columns(2)
         with col4:
-            st.metric("Net Profit", f"${results['net_profit']:,.0f}")
+            st.metric("Net Profit", f"${net_profit_display:,.0f}", delta=profit_delta_label)
         with col5:
-            st.metric("Expected Adopters", f"{results['expected_adopters']:,.0f}")
+            st.metric("Expected Adopters", f"{adopters_display:,.0f}", delta=adopters_delta_label)
+
+        if has_talent_impact:
+            st.caption(
+                f"Baseline (pre-talent) forecast: value ${base_value:,.0f}, ROI {base_roi:.1f}%, net profit ${base_net_profit:,.0f}."
+            )
 
         # Show budget and population tier information
         tier_label = "High-Budget (Top Tier)" if results.get('budget_tier') == "high" else "Standard Budget"
         population_label = f"{results.get('target_population', 600000):,}"
         st.info(f"**{tier_label}** investment - Analysis based on ${budget:,.0f} budget with {population_label} target population")
+
+        if talent_names:
+            st.markdown("---")
+
+            if has_talent_impact:
+                st.subheader("Notable Cast / Director Impact")
+
+                impact_cols = st.columns(3)
+                with impact_cols[0]:
+                    st.metric("Low Case Value", f"${talent_adjustments['value_low']:,.0f}")
+                with impact_cols[1]:
+                    st.metric("Expected Value", f"${talent_adjustments['value_expected']:,.0f}")
+                with impact_cols[2]:
+                    st.metric("High Case Value", f"${talent_adjustments['value_high']:,.0f}")
+
+                lift_expected = (talent_adjustments['multiplier_expected'] - 1.0) * 100
+                lift_low = (talent_adjustments['multiplier_low'] - 1.0) * 100
+                lift_high = (talent_adjustments['multiplier_high'] - 1.0) * 100
+                st.caption(
+                    f"Talent-driven lift vs baseline: expected {lift_expected:+.1f}% (range {lift_low:+.1f}% to {lift_high:+.1f}%)."
+                )
+
+                breakdown = talent_adjustments.get('talent_breakdown') or []
+                if breakdown:
+                    breakdown_df = pd.DataFrame(breakdown)
+                    rename_map = {
+                        'name': 'Talent',
+                        'impact_direction': 'Direction',
+                        'expected_change_pct': 'Expected %Δ',
+                        'low_change_pct': 'Low %Δ',
+                        'high_change_pct': 'High %Δ',
+                        'rationale': 'Rationale'
+                    }
+                    breakdown_df = breakdown_df.rename(columns=rename_map)
+                    pct_columns = ['Expected %Δ', 'Low %Δ', 'High %Δ']
+                    def _fmt_pct(value: Any) -> str:
+                        try:
+                            return f"{float(value):+.1f}%"
+                        except (TypeError, ValueError):
+                            return "n/a"
+                    for col in pct_columns:
+                        if col in breakdown_df.columns:
+                            breakdown_df[col] = breakdown_df[col].map(_fmt_pct)
+
+                    st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
+
+                assumptions = talent_adjustments.get('assumptions') or []
+                if assumptions:
+                    st.markdown("**Assumptions & Notes**")
+                    for item in assumptions:
+                        st.markdown(f"- {item}")
+            else:
+                if not talent_research:
+                    st.info("Talent adjustments skipped. Add an EXA_API_KEY or refine the listed names to fetch research.")
+                else:
+                    st.info("Talent research returned but the AI could not quantify impact. Baseline ROI shown above.")
+
+            if talent_research:
+                with st.expander("Research sources (Exa)"):
+                    for name in talent_names:
+                        sources = talent_research.get(name, [])
+                        st.markdown(f"**{name}**")
+                        if not sources:
+                            st.markdown("- No summaries returned.")
+                            continue
+                        for source in sources:
+                            title = source.get('title', 'Source')
+                            url = source.get('url')
+                            snippet = source.get('snippet', '')
+                            if url:
+                                st.markdown(f"- [{title}]({url}) – {snippet}")
+                            else:
+                                st.markdown(f"- {title} – {snippet}")
+                        st.markdown(" ")
 
         st.markdown("---")
 
