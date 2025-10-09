@@ -749,6 +749,127 @@ def parse_notable_talent(raw_input: Optional[str]) -> List[str]:
 
     return deduped
 
+
+def llm_estimate_talent_impact_engagement(
+    metadata: Dict[str, Any],
+    predictions_df: pd.DataFrame,
+    talent_research: Dict[str, List[Dict[str, Any]]],
+    llm_model: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Estimate engagement impact adjustments from notable talent using LLM synthesis."""
+    if not talent_research:
+        return None
+
+    if not llm_model:
+        st.warning("LLM model not configured; skipping talent impact synthesis.")
+        return None
+
+    # Build research digest for the prompt
+    digest_sections = []
+    for name, items in talent_research.items():
+        if not items:
+            digest_sections.append(f"{name}: no recent metrics surfaced.\n")
+            continue
+
+        bullet_points = []
+        for item in items:
+            title = item.get("title", "Untitled source")
+            snippet = item.get("snippet", "")
+            url = item.get("url") or ""
+            if url:
+                bullet_points.append(f"- {title}: {snippet} (Source: {url})")
+            else:
+                bullet_points.append(f"- {title}: {snippet}")
+
+        digest_sections.append(f"{name}:\n" + "\n".join(bullet_points[:max(1, min(3, len(bullet_points)))]))
+
+    research_digest = "\n\n".join(digest_sections)
+
+    title = metadata.get('FRANCHISE_TITLE', 'Untitled Project')
+    logline = metadata.get('logline', 'No logline provided.')
+
+    # Prepare cluster predictions for LLM
+    cluster_predictions = []
+    for _, row in predictions_df.iterrows():
+        cluster_id = int(row['cluster_id'])
+        cluster_name = CLUSTER_LABELS.get(str(cluster_id), f"Cluster {cluster_id}")
+        cluster_predictions.append({
+            'cluster_id': cluster_id,
+            'cluster_name': cluster_name,
+            'baseline_prediction': float(row['p_adopt'])
+        })
+
+    prompt = dedent(f"""
+        You are an entertainment analytics strategist for BET+, a streaming platform focused on Black entertainment and culture.
+
+        PROJECT CONTEXT:
+        - Title: {title}
+        - Content Type: {metadata.get('CONTENT_TYPE', 'Unknown')}
+        - Logline: {logline}
+        - Genre: {metadata.get('Genre', 'Unknown')}
+        - Subgenre: {metadata.get('Subgenre', 'Unknown')}
+
+        BASELINE ENGAGEMENT PREDICTIONS:
+        Our ML model predicted these engagement probabilities for each audience cluster:
+        {json.dumps(cluster_predictions, indent=2)}
+
+        TALENT RESEARCH (summaries of recent coverage, performance data, or comparable releases):
+        {research_digest}
+
+        TASK:
+        Based on the talent research, adjust the engagement predictions to reflect the star power and audience draw of the notable cast/directors.
+        Consider:
+        1. How the talent's previous work aligns with BET+ audience preferences
+        2. Their track record with similar content
+        3. Their cultural recognition and appeal to specific audience clusters
+        4. Whether their presence would broaden appeal or deepen engagement with existing fans
+
+        REQUIREMENTS:
+        - Return ONLY valid JSON with this schema:
+        {{
+            "adjustments": [
+                {{
+                    "cluster_id": 0,
+                    "adjusted_prediction": 0.75,
+                    "multiplier": 1.15,
+                    "rationale": "Brief explanation of adjustment"
+                }},
+                ...
+            ],
+            "overall_multiplier_low": 1.05,
+            "overall_multiplier_expected": 1.15,
+            "overall_multiplier_high": 1.25,
+            "confidence": "low|medium|high",
+            "assumptions": ["String"],
+            "talent_breakdown": [
+                {{
+                    "name": "Talent Name",
+                    "impact_direction": "positive|neutral|negative",
+                    "expected_change_pct": 12.5,
+                    "low_change_pct": 5.0,
+                    "high_change_pct": 20.0,
+                    "rationale": "One-sentence justification referencing the research"
+                }}
+            ]
+        }}
+        - Adjusted predictions must be between 0.0 and 1.0
+        - Multipliers must be numeric, between 0.8 and 1.5
+        - Percent fields represent percentage change relative to baseline
+        - Provide adjustments for ALL {len(cluster_predictions)} clusters
+        - If evidence suggests minimal impact, set all multipliers close to 1.0
+    """)
+
+    llm_response = _call_llm(prompt, llm_model)
+    if not llm_response:
+        return None
+
+    try:
+        parsed = json.loads(llm_response)
+        return parsed
+    except json.JSONDecodeError:
+        st.warning("Could not parse talent impact response from LLM. Showing baseline only.")
+        return None
+
 def determine_budget_tier(budget: float, content_type: str) -> str:
     """Determine if this is a high-budget (top tier) investment based on industry standards."""
     # High-budget thresholds based on content type
@@ -1091,6 +1212,8 @@ if 'roi_metadata' not in st.session_state:
     st.session_state.roi_metadata = None
 if 'talent_results' not in st.session_state:
     st.session_state.talent_results = None
+if 'engagement_talent_results' not in st.session_state:
+    st.session_state.engagement_talent_results = None
 
 llm_model = "x-ai/grok-4-fast"  # Hidden from UI - using OpenRouter
 
@@ -1161,6 +1284,13 @@ with tab1:
 
     # LLM validation always enabled (hidden from user)
     use_llm_validation = True
+
+    st.text_input(
+        "Notable Cast / Director",
+        placeholder="Issa Rae, Ava DuVernay",
+        help="Optional. Add lead talent or directors to pull performance research and adjust engagement forecasts.",
+        key="engagement_talent_input"
+    )
 
     if uploaded_files and st.button("Generate Metadata"):
         script_text = ""
@@ -1240,7 +1370,8 @@ with tab1:
         with col1:
             if st.button("Run Prediction"):
                 with st.spinner("Running prediction..."):
-                    st.session_state.predictions = predict_from_metadata(
+                    # Get baseline predictions
+                    baseline_predictions = predict_from_metadata(
                         st.session_state.metadata,
                         trained_models,
                         centroids,
@@ -1249,6 +1380,44 @@ with tab1:
                         use_llm_validation=use_llm_validation,
                         llm_model=llm_model
                     )
+                    st.session_state.predictions = baseline_predictions
+
+                    # Check for notable talent
+                    talent_names = parse_notable_talent(st.session_state.get('engagement_talent_input', ''))
+                    if talent_names:
+                        with st.spinner("Researching notable talent impact..."):
+                            talent_research = collect_talent_research(talent_names)
+                            talent_impact = None
+
+                            if talent_research:
+                                talent_impact = llm_estimate_talent_impact_engagement(
+                                    st.session_state.metadata,
+                                    baseline_predictions,
+                                    talent_research,
+                                    llm_model
+                                )
+
+                            # Store talent results
+                            st.session_state.engagement_talent_results = {
+                                'names': talent_names,
+                                'research': talent_research,
+                                'impact': talent_impact,
+                                'baseline_predictions': baseline_predictions
+                            }
+
+                            # Apply adjustments to predictions if available
+                            if talent_impact and 'adjustments' in talent_impact:
+                                adjusted_predictions = baseline_predictions.copy()
+                                adjustment_map = {adj['cluster_id']: adj['adjusted_prediction']
+                                               for adj in talent_impact['adjustments']}
+                                adjusted_predictions['p_adopt_baseline'] = adjusted_predictions['p_adopt']
+                                adjusted_predictions['p_adopt'] = adjusted_predictions['cluster_id'].map(
+                                    lambda cid: np.clip(adjustment_map.get(cid, adjusted_predictions[adjusted_predictions['cluster_id'] == cid]['p_adopt'].iloc[0]), 0.0, 1.0)
+                                )
+                                st.session_state.predictions = adjusted_predictions.sort_values('p_adopt', ascending=False)
+                    else:
+                        # Clear talent results if no talent specified
+                        st.session_state.engagement_talent_results = None
         with col2:
             if st.button("🔄 Retry", help="Auto-generated details missed the mark? Try again."):
                 retry_dialog()
@@ -1302,7 +1471,106 @@ with tab1:
         st.markdown(f"**Key Insight:** {insight}")
 
         # Engagement score
-        st.metric("Engagement Score", f"{engagement_index:.0%}", help="Average engagement probability of top 3 audience clusters")
+        talent_results = st.session_state.get('engagement_talent_results')
+        has_talent_impact = bool(talent_results and talent_results.get('impact') and talent_results['impact'].get('adjustments'))
+
+        if has_talent_impact:
+            baseline_predictions = talent_results.get('baseline_predictions')
+            if baseline_predictions is not None:
+                baseline_top_3 = baseline_predictions.sort_values('p_adopt', ascending=False).head(3)['p_adopt'].values
+                baseline_engagement_index = baseline_top_3.mean()
+                engagement_delta = engagement_index - baseline_engagement_index
+                delta_label = f"{'+' if engagement_delta >= 0 else ''}{engagement_delta:.1%} vs baseline"
+                st.metric("Engagement Score (w/ Talent)", f"{engagement_index:.0%}", delta=delta_label, help="Average engagement probability of top 3 audience clusters, adjusted for notable talent")
+            else:
+                st.metric("Engagement Score", f"{engagement_index:.0%}", help="Average engagement probability of top 3 audience clusters")
+        else:
+            st.metric("Engagement Score", f"{engagement_index:.0%}", help="Average engagement probability of top 3 audience clusters")
+
+        # Display talent impact details if available
+        if talent_results:
+            talent_names = talent_results.get('names', [])
+            talent_research = talent_results.get('research', {})
+            talent_impact = talent_results.get('impact')
+
+            if talent_names:
+                st.markdown("---")
+
+                if has_talent_impact:
+                    st.subheader("Notable Cast / Director Impact")
+
+                    talent_impact_data = talent_impact
+                    multiplier_low = talent_impact_data.get('overall_multiplier_low', 1.0)
+                    multiplier_expected = talent_impact_data.get('overall_multiplier_expected', 1.0)
+                    multiplier_high = talent_impact_data.get('overall_multiplier_high', 1.0)
+
+                    impact_cols = st.columns(3)
+                    with impact_cols[0]:
+                        st.metric("Low Case Multiplier", f"{multiplier_low:.2f}x")
+                    with impact_cols[1]:
+                        st.metric("Expected Multiplier", f"{multiplier_expected:.2f}x")
+                    with impact_cols[2]:
+                        st.metric("High Case Multiplier", f"{multiplier_high:.2f}x")
+
+                    lift_expected = (multiplier_expected - 1.0) * 100
+                    lift_low = (multiplier_low - 1.0) * 100
+                    lift_high = (multiplier_high - 1.0) * 100
+                    st.caption(
+                        f"Talent-driven lift vs baseline: expected {lift_expected:+.1f}% (range {lift_low:+.1f}% to {lift_high:+.1f}%)."
+                    )
+
+                    breakdown = talent_impact_data.get('talent_breakdown') or []
+                    if breakdown:
+                        breakdown_df = pd.DataFrame(breakdown)
+                        rename_map = {
+                            'name': 'Talent',
+                            'impact_direction': 'Direction',
+                            'expected_change_pct': 'Expected %Δ',
+                            'low_change_pct': 'Low %Δ',
+                            'high_change_pct': 'High %Δ',
+                            'rationale': 'Rationale'
+                        }
+                        breakdown_df = breakdown_df.rename(columns=rename_map)
+                        pct_columns = ['Expected %Δ', 'Low %Δ', 'High %Δ']
+                        def _fmt_pct(value: Any) -> str:
+                            try:
+                                return f"{float(value):+.1f}%"
+                            except (TypeError, ValueError):
+                                return "n/a"
+                        for col in pct_columns:
+                            if col in breakdown_df.columns:
+                                breakdown_df[col] = breakdown_df[col].map(_fmt_pct)
+
+                        st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
+
+                    assumptions = talent_impact_data.get('assumptions') or []
+                    if assumptions:
+                        st.markdown("**Assumptions & Notes**")
+                        for item in assumptions:
+                            st.markdown(f"- {item}")
+                else:
+                    if not talent_research:
+                        st.info("Talent adjustments skipped. Add an EXA_API_KEY or refine the listed names to fetch research.")
+                    else:
+                        st.info("Talent research returned but the AI could not quantify impact. Baseline engagement shown above.")
+
+                if talent_research:
+                    with st.expander("Research sources (Exa)"):
+                        for name in talent_names:
+                            sources = talent_research.get(name, [])
+                            st.markdown(f"**{name}**")
+                            if not sources:
+                                st.markdown("- No summaries returned.")
+                                continue
+                            for source in sources:
+                                title = source.get('title', 'Source')
+                                url = source.get('url')
+                                snippet = source.get('snippet', '')
+                                if url:
+                                    st.markdown(f"- [{title}]({url}) – {snippet}")
+                                else:
+                                    st.markdown(f"- {title} – {snippet}")
+                            st.markdown(" ")
 
         st.markdown("---")
         st.markdown("<div style='margin-top: 40px;'></div>", unsafe_allow_html=True)
@@ -1462,6 +1730,22 @@ with tab2:
                                 talent_adjustments = derive_talent_adjustments(results, talent_impact_raw)
 
                         if talent_adjustments:
+                            # Recalculate cluster breakdown with talent-adjusted values
+                            adjusted_breakdown = results['cluster_breakdown'].copy()
+                            multiplier_expected = talent_adjustments['multiplier_expected']
+
+                            # Apply multiplier to adopters and recalculate value
+                            adjusted_breakdown['expected_adopters'] = adjusted_breakdown['expected_adopters'] * multiplier_expected
+                            adjusted_breakdown['cluster_value'] = adjusted_breakdown['expected_adopters'] * VALUE_PER_ADOPTER * results['avg_completion_rate']
+
+                            # Recalculate value share based on new total
+                            total_adjusted_value = adjusted_breakdown['cluster_value'].sum()
+                            if total_adjusted_value > 0:
+                                adjusted_breakdown['value_share'] = adjusted_breakdown['cluster_value'] / total_adjusted_value
+
+                            # Re-sort by adjusted cluster value
+                            adjusted_breakdown = adjusted_breakdown.sort_values('cluster_value', ascending=False).reset_index(drop=True)
+
                             results.update({
                                 'estimated_value_adjusted': talent_adjustments['value_expected'],
                                 'estimated_value_low': talent_adjustments['value_low'],
@@ -1479,7 +1763,9 @@ with tab2:
                                     'high': talent_adjustments['multiplier_high']
                                 },
                                 'talent_assumptions': talent_adjustments.get('assumptions', []),
-                                'talent_breakdown': talent_adjustments.get('talent_breakdown', [])
+                                'talent_breakdown': talent_adjustments.get('talent_breakdown', []),
+                                'cluster_breakdown_adjusted': adjusted_breakdown,
+                                'cluster_breakdown_baseline': results['cluster_breakdown']
                             })
                         else:
                             results.update({
@@ -1685,17 +1971,31 @@ with tab2:
         # Cluster Breakdown
         st.subheader("Value by Audience Cluster")
 
-        cluster_breakdown = results.get('cluster_breakdown')
+        # Use adjusted breakdown if talent impact exists, otherwise use baseline
+        has_adjusted_breakdown = bool(talent_adjustments and results.get('cluster_breakdown_adjusted') is not None)
+        cluster_breakdown = results.get('cluster_breakdown_adjusted') if has_adjusted_breakdown else results.get('cluster_breakdown')
+
         if cluster_breakdown is not None and not cluster_breakdown.empty:
             total_value = float(cluster_breakdown['cluster_value'].sum())
             total_share = float(cluster_breakdown['value_share'].sum())
-            value_diff = total_value - float(results['estimated_value'])
+
+            # Show comparison if we have adjusted values
+            if has_adjusted_breakdown:
+                baseline_breakdown = results.get('cluster_breakdown_baseline')
+                baseline_total = float(baseline_breakdown['cluster_value'].sum()) if baseline_breakdown is not None else 0
+                value_delta = total_value - baseline_total
+                delta_label = f"{'+' if value_delta >= 0 else ''}{value_delta:,.0f} vs baseline" if baseline_total > 0 else None
+            else:
+                delta_label = None
 
             summary_cols = st.columns(2)
             with summary_cols[0]:
-                st.metric("Cluster Value Sum", f"${total_value:,.0f}")
+                st.metric("Cluster Value Sum", f"${total_value:,.0f}", delta=delta_label)
             with summary_cols[1]:
                 st.metric("Value Coverage", f"{total_share:.0%}")
+
+            if has_adjusted_breakdown:
+                st.caption("Breakdown reflects talent-adjusted values. Baseline breakdown available in detailed view below.")
 
             # Removed validation messaging for cleaner display
 
@@ -1714,12 +2014,52 @@ with tab2:
         # Detailed table
         with st.expander("View Detailed Breakdown"):
             if cluster_breakdown is not None and not cluster_breakdown.empty:
-                display_columns = ['cluster_name', 'p_adopt', 'cluster_value', 'value_share']
-                display_breakdown = cluster_breakdown[display_columns].copy()
-                display_breakdown['p_adopt'] = display_breakdown['p_adopt'].map(lambda x: f"{x:.1%}")
-                display_breakdown['cluster_value'] = display_breakdown['cluster_value'].map(lambda x: f"${x:,.0f}")
-                display_breakdown['value_share'] = display_breakdown['value_share'].map(lambda x: f"{x:.1%}")
-                st.dataframe(display_breakdown, use_container_width=True)
+                if has_adjusted_breakdown:
+                    # Show both baseline and adjusted in tabs
+                    tab_adjusted, tab_baseline = st.tabs(["Adjusted (w/ Talent)", "Baseline"])
+
+                    with tab_adjusted:
+                        display_columns = ['cluster_name', 'p_adopt', 'cluster_value', 'value_share']
+                        display_breakdown = cluster_breakdown[display_columns].copy()
+                        display_breakdown = display_breakdown.rename(columns={
+                            'cluster_name': 'Cluster',
+                            'p_adopt': 'Engagement %',
+                            'cluster_value': 'Value',
+                            'value_share': 'Value Share'
+                        })
+                        display_breakdown['Engagement %'] = display_breakdown['Engagement %'].map(lambda x: f"{x:.1%}")
+                        display_breakdown['Value'] = display_breakdown['Value'].map(lambda x: f"${x:,.0f}")
+                        display_breakdown['Value Share'] = display_breakdown['Value Share'].map(lambda x: f"{x:.1%}")
+                        st.dataframe(display_breakdown, use_container_width=True, hide_index=True)
+
+                    with tab_baseline:
+                        baseline_breakdown = results.get('cluster_breakdown_baseline')
+                        if baseline_breakdown is not None and not baseline_breakdown.empty:
+                            display_columns = ['cluster_name', 'p_adopt', 'cluster_value', 'value_share']
+                            display_baseline = baseline_breakdown[display_columns].copy()
+                            display_baseline = display_baseline.rename(columns={
+                                'cluster_name': 'Cluster',
+                                'p_adopt': 'Engagement %',
+                                'cluster_value': 'Value',
+                                'value_share': 'Value Share'
+                            })
+                            display_baseline['Engagement %'] = display_baseline['Engagement %'].map(lambda x: f"{x:.1%}")
+                            display_baseline['Value'] = display_baseline['Value'].map(lambda x: f"${x:,.0f}")
+                            display_baseline['Value Share'] = display_baseline['Value Share'].map(lambda x: f"{x:.1%}")
+                            st.dataframe(display_baseline, use_container_width=True, hide_index=True)
+                else:
+                    display_columns = ['cluster_name', 'p_adopt', 'cluster_value', 'value_share']
+                    display_breakdown = cluster_breakdown[display_columns].copy()
+                    display_breakdown = display_breakdown.rename(columns={
+                        'cluster_name': 'Cluster',
+                        'p_adopt': 'Engagement %',
+                        'cluster_value': 'Value',
+                        'value_share': 'Value Share'
+                    })
+                    display_breakdown['Engagement %'] = display_breakdown['Engagement %'].map(lambda x: f"{x:.1%}")
+                    display_breakdown['Value'] = display_breakdown['Value'].map(lambda x: f"${x:,.0f}")
+                    display_breakdown['Value Share'] = display_breakdown['Value Share'].map(lambda x: f"{x:.1%}")
+                    st.dataframe(display_breakdown, use_container_width=True, hide_index=True)
 
 # ==================== TAB 3: CLUSTER GUIDE ====================
 with tab3:
