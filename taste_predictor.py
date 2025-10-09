@@ -21,15 +21,22 @@ except ImportError:
     HAS_SENTENCE_TRANSFORMERS = False
     SentenceTransformer = None
 
-# Handle PDF OCR dependencies
+# Handle PDF dependencies
 try:
-    import PyPDF2
-    from pdf2image import convert_from_bytes
-    import pytesseract
-    from PIL import Image
+    from pypdf import PdfReader
     HAS_PDF_SUPPORT = True
 except ImportError:
     HAS_PDF_SUPPORT = False
+    PdfReader = None
+
+# Handle OCR dependencies (optional for image-based PDFs)
+try:
+    from pdf2image import convert_from_bytes
+    import pytesseract
+    from PIL import Image
+    HAS_OCR_SUPPORT = True
+except ImportError:
+    HAS_OCR_SUPPORT = False
 
 # Handle database dependencies
 try:
@@ -189,28 +196,31 @@ embedder, trained_models, centroids, cluster_summary_df = load_models()
 # --- Functions from Notebook (adapted for Streamlit) ---
 
 def extract_text_from_pdf(pdf_file) -> str:
-    """Extract text from PDF using PyPDF2, fallback to OCR if needed."""
+    """Extract text from PDF using pypdf, fallback to OCR if available and needed."""
     if not HAS_PDF_SUPPORT:
-        st.error("PDF support not available. Please install PyPDF2, pdf2image, and pytesseract.")
+        st.error("PDF support not available. Please install pypdf.")
         return None
 
     try:
-        # First try PyPDF2 for text extraction
+        # First try pypdf for text extraction
         pdf_bytes = pdf_file.read()
         pdf_file.seek(0)  # Reset file pointer
 
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        pdf_reader = PdfReader(pdf_file)
         text = ""
         for page in pdf_reader.pages:
             text += page.extract_text() + "\n"
 
-        # If text extraction yielded very little text, try OCR
+        # If text extraction yielded very little text, try OCR if available
         if len(text.strip()) < 100:
-            st.info("PDF appears to be image-based. Running OCR (this may take a moment)...")
-            images = convert_from_bytes(pdf_bytes)
-            text = ""
-            for i, image in enumerate(images):
-                text += pytesseract.image_to_string(image) + "\n"
+            if HAS_OCR_SUPPORT:
+                st.info("PDF appears to be image-based. Running OCR (this may take a moment)...")
+                images = convert_from_bytes(pdf_bytes)
+                text = ""
+                for i, image in enumerate(images):
+                    text += pytesseract.image_to_string(image) + "\n"
+            else:
+                st.warning("PDF appears to be image-based, but OCR support is not available. Showing extracted text (may be incomplete).")
 
         return text.strip()
     except Exception as e:
@@ -1274,7 +1284,14 @@ with tab1:
     """, unsafe_allow_html=True)
 
     # --- 1. Upload Script ---
-    uploaded_files = st.file_uploader("Upload script / pitch file(s) (.txt or .pdf)", type=["txt", "pdf"], key="engagement_upload", accept_multiple_files=True)
+    # Dynamically set allowed file types based on PDF support
+    allowed_types = ["txt", "pdf"] if HAS_PDF_SUPPORT else ["txt"]
+    file_type_label = ".txt or .pdf" if HAS_PDF_SUPPORT else ".txt"
+
+    uploaded_files = st.file_uploader(f"Upload script / pitch file(s) ({file_type_label})", type=allowed_types, key="engagement_upload", accept_multiple_files=True)
+
+    if not HAS_PDF_SUPPORT and uploaded_files:
+        st.info("PDF support is not available. Please upload .txt files only.")
 
     # Show alert for multiple files
     if uploaded_files and len(uploaded_files) > 1:
@@ -1657,7 +1674,14 @@ with tab2:
     """, unsafe_allow_html=True)
 
     # --- 1. Upload Script ---
-    roi_uploaded_files = st.file_uploader("Upload script / pitch file(s) (.txt or .pdf)", type=["txt", "pdf"], key="roi_upload", accept_multiple_files=True)
+    # Dynamically set allowed file types based on PDF support
+    roi_allowed_types = ["txt", "pdf"] if HAS_PDF_SUPPORT else ["txt"]
+    roi_file_type_label = ".txt or .pdf" if HAS_PDF_SUPPORT else ".txt"
+
+    roi_uploaded_files = st.file_uploader(f"Upload script / pitch file(s) ({roi_file_type_label})", type=roi_allowed_types, key="roi_upload", accept_multiple_files=True)
+
+    if not HAS_PDF_SUPPORT and roi_uploaded_files:
+        st.info("PDF support is not available. Please upload .txt files only.")
 
     # Show alert for multiple files
     if roi_uploaded_files and len(roi_uploaded_files) > 1:
@@ -1669,7 +1693,29 @@ with tab2:
     roi_use_llm_validation = True
 
     # --- 2. Budget Input ---
-    budget = st.number_input("Enter Budget ($)", min_value=0, value=100000, step=10000)
+    st.markdown("#### Budget")
+    budget_col1, budget_col2 = st.columns(2)
+    with budget_col1:
+        acquisition_budget = st.number_input(
+            "Acquisition Budget ($)",
+            min_value=0,
+            value=100000,
+            step=10000,
+            help="Cost to acquire or produce the content"
+        )
+    with budget_col2:
+        marketing_budget = st.number_input(
+            "Marketing Budget ($)",
+            min_value=0,
+            value=0,
+            step=10000,
+            help="Budget allocated for marketing and promotion"
+        )
+
+    # Calculate total budget
+    total_budget = acquisition_budget + marketing_budget
+    if total_budget > 0:
+        st.caption(f"Total Budget: ${total_budget:,}")
 
     st.text_input(
         "Notable Cast / Director",
@@ -1703,7 +1749,7 @@ with tab2:
 
                     results = predict_roi(
                         roi_metadata,
-                        budget,
+                        total_budget,
                         roi_content_type,
                         trained_models,
                         centroids,
@@ -1711,6 +1757,11 @@ with tab2:
                         use_llm_validation=roi_use_llm_validation,
                         llm_model=llm_model
                     )
+
+                    # Add budget breakdown to results
+                    if results:
+                        results['acquisition_budget'] = acquisition_budget
+                        results['marketing_budget'] = marketing_budget
 
                     if results:
                         talent_names = parse_notable_talent(st.session_state.get('roi_talent_input', ''))
@@ -1860,7 +1911,17 @@ with tab2:
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Estimated Cost", f"${results['estimated_cost']:,.0f}")
+            acquisition_budget = results.get('acquisition_budget', 0)
+            marketing_budget = results.get('marketing_budget', 0)
+            total_cost = results['estimated_cost']
+
+            # Build help text with breakdown
+            if marketing_budget > 0:
+                cost_help = f"Acquisition: ${acquisition_budget:,} | Marketing: ${marketing_budget:,}"
+            else:
+                cost_help = f"Acquisition: ${acquisition_budget:,}"
+
+            st.metric("Estimated Cost", f"${total_cost:,.0f}", help=cost_help)
         with col2:
             st.metric("Estimated Value", f"${value_display:,.0f}", delta=value_delta_label)
         with col3:
