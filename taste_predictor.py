@@ -1047,12 +1047,38 @@ def predict_roi(metadata: dict, budget: float, content_type: str, trained_models
     }
 
 
-# --- Custom CSS for Modern UI (Theme-aware) ---
+# --- Custom CSS for Modern UI ---
 st.markdown("""
 <style>
-    /* Remove hardcoded backgrounds to respect user's theme preference */
+    /* Main app styling */
+    .stApp {
+        background: linear-gradient(135deg, #f5f5f5 0%, #ffffff 100%);
+    }
 
-    /* Spacing and layout improvements */
+    /* Custom header */
+    .main-header {
+        background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+        padding: 2rem;
+        border-radius: 15px;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    .main-header h1 {
+        color: white;
+        margin: 0;
+        font-size: 2.5rem;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+    }
+
+    .main-header p {
+        color: #cccccc;
+        margin: 0.5rem 0 0 0;
+        font-size: 1.1rem;
+    }
+
+    /* Step indicators */
     .step-container {
         display: flex;
         justify-content: space-between;
@@ -1062,20 +1088,27 @@ st.markdown("""
 
     .step-card {
         flex: 1;
+        background: white;
         padding: 1.5rem;
         border-radius: 12px;
+        border: 2px solid #e0e0e0;
         text-align: center;
         transition: all 0.3s ease;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
     }
 
     .step-card:hover {
         transform: translateY(-5px);
+        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+        border-color: #333;
     }
 
     .step-number {
         display: inline-block;
         width: 40px;
         height: 40px;
+        background: linear-gradient(135deg, #1a1a1a 0%, #3d3d3d 100%);
+        color: white;
         border-radius: 50%;
         line-height: 40px;
         font-weight: bold;
@@ -1085,50 +1118,85 @@ st.markdown("""
 
     .step-title {
         font-weight: 600;
+        color: #1a1a1a;
         margin: 0.5rem 0;
         font-size: 1rem;
     }
 
     .step-desc {
+        color: #666;
         font-size: 0.9rem;
         margin: 0;
-        opacity: 0.8;
     }
 
     /* Upload section */
     .upload-section {
+        background: white;
         padding: 2rem;
         border-radius: 12px;
+        border: 2px dashed #d0d0d0;
         margin: 1.5rem 0;
         transition: all 0.3s ease;
     }
 
-    /* Metadata cards */
-    .metadata-card {
-        padding: 1.5rem;
-        border-radius: 12px;
-        margin: 1rem 0;
+    .upload-section:hover {
+        border-color: #333;
+        background: #fafafa;
     }
 
-    /* Button styling - respect theme */
+    /* Metadata cards */
+    .metadata-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        border-left: 4px solid #1a1a1a;
+        margin: 1rem 0;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    }
+
+    /* Button styling */
     .stButton > button {
+        background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+        color: white;
+        border: none;
+        padding: 0.75rem 2rem;
         border-radius: 8px;
         font-weight: 600;
         transition: all 0.3s ease;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
     }
 
     .stButton > button:hover {
         transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     }
 
-    /* Recommendation banner - maintain colored backgrounds for visibility */
+    /* Recommendation banner */
     .recommendation-banner {
         padding: 2.5rem;
         border-radius: 15px;
         text-align: center;
         margin: 2rem 0;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
         position: relative;
         overflow: hidden;
+    }
+
+    .recommendation-banner::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+        animation: shine 3s infinite;
+    }
+
+    @keyframes shine {
+        0% { left: -100%; }
+        50% { left: 100%; }
+        100% { left: 100%; }
     }
 
     .recommendation-banner h1 {
@@ -1139,25 +1207,100 @@ st.markdown("""
         text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
     }
 
+    /* Insight box */
+    .insight-box {
+        background: linear-gradient(135deg, #f8f8f8 0%, #ffffff 100%);
+        padding: 1.5rem;
+        border-radius: 12px;
+        border-left: 4px solid #1a1a1a;
+        margin: 1.5rem 0;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    }
+
     /* Metric cards */
     div[data-testid="stMetricValue"] {
         font-size: 2rem;
         font-weight: 700;
+        color: #1a1a1a;
+    }
+
+    /* Cluster cards */
+    .cluster-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 2px solid #e0e0e0;
+        transition: all 0.3s ease;
+        margin: 0.5rem 0;
+    }
+
+    .cluster-card:hover {
+        transform: scale(1.05);
+        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+        border-color: #333;
+    }
+
+    .cluster-card-top {
+        background: linear-gradient(135deg, #1a1a1a 0%, #3d3d3d 100%);
+        color: white;
+        border: 2px solid #1a1a1a;
+    }
+
+    .cluster-card-top:hover {
+        transform: scale(1.08);
+        box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
+    }
+
+    /* Radio buttons */
+    div[role="radiogroup"] label {
+        background: white;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        border: 2px solid #e0e0e0;
+        transition: all 0.3s ease;
+    }
+
+    div[role="radiogroup"] label:hover {
+        border-color: #333;
+        background: #f5f5f5;
+    }
+
+    /* Text areas */
+    .stTextArea textarea {
+        border-radius: 8px;
+        border: 2px solid #e0e0e0;
+        transition: all 0.3s ease;
+    }
+
+    .stTextArea textarea:focus {
+        border-color: #333;
+        box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.1);
+    }
+
+    /* Progress bar */
+    .stProgress > div > div > div > div {
+        background: linear-gradient(135deg, #1a1a1a 0%, #3d3d3d 100%);
     }
 
     /* Divider */
     hr {
         margin: 2rem 0;
+        border: none;
+        height: 2px;
+        background: linear-gradient(90deg, transparent, #e0e0e0, transparent);
     }
 </style>
 """, unsafe_allow_html=True)
 
 # --- Streamlit App ---
 
-# Modern header (using native Streamlit for theme compatibility)
-st.title("Signal")
-st.markdown("**Audience engagement analysis for scripts and pitches**")
-st.markdown("---")
+# Modern header
+st.markdown("""
+<div class="main-header">
+    <h1>Signal</h1>
+    <p>Audience engagement analysis for scripts and pitches</p>
+</div>
+""", unsafe_allow_html=True)
 
 # Create tabs
 tab1, tab2, tab3 = st.tabs(["Engagement Predictor", "ROI Predictor", "Cluster Guide"])
