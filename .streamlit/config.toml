@@ -7,3 +7,5 @@ enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
+
+# No theme configuration - automatically respects user's system preference (light/dark mode)
