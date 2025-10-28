@@ -1292,6 +1292,43 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- Password Authentication ---
+def check_password():
+    """Returns True if the user has entered the correct password."""
+
+    # Initialize session state for authentication
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+
+    # If already authenticated, return True
+    if st.session_state["password_correct"]:
+        return True
+
+    # Show password input
+    st.markdown("""
+    <div class="main-header">
+        <h1>Signal</h1>
+        <p>Audience engagement analysis for scripts and pitches</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### Please enter password to access the application")
+
+    password = st.text_input("Password", type="password", key="password_input")
+
+    if st.button("Login"):
+        if password == "Flex123":
+            st.session_state["password_correct"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password. Please try again.")
+
+    return False
+
+# Check password before showing main app
+if not check_password():
+    st.stop()
+
 # --- Streamlit App ---
 
 # Modern header
